@@ -13,7 +13,7 @@ export default async function SignIn() {
           await signOut();
         }}
       >
-        <button type="submit" className="p-2 border-2 bl-blue-400">Signout</button>
+        <button type="submit" className="p-2 border-2 bg-blue-400">Signout</button>
       </form>
     </>
   ) : (
