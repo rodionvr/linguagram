@@ -1,4 +1,5 @@
-flask   
+flask
+flask-wtf
 google-genai
 pymongo
 flask-cors
