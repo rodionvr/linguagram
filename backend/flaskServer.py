@@ -231,6 +231,95 @@ def get_conversations():
 
     return jsonify({"conversations": convs_list}), 200
 
+@app.route("/getMessages", methods = ["GET"])
+@login_required
+def get_messages():
+    # Expected query params: email (caller email), conversation_id
+    user_email = request.args.get("email")
+    conv_id = request.args.get("conversation_id")
+
+    if not user_email or not conv_id:
+        return jsonify({"error": "Missing 'email' or 'conversation_id' parameter"}), 400
+
+    accounts = _get_accounts_collection()
+    conversations = _get_conversations_collection()
+    messages = _get_messages_collection()
+    if accounts is None or conversations is None or messages is None:
+        return jsonify({"error": "Database not configured. Set MONGO_URI in environment or backend/.env"}), 500
+
+    # Find caller
+    user = accounts.find_one({"email": user_email})
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    user_id = user.get("_id")
+    user_lang = user.get("language") or ""
+
+    # Validate conversation exists and caller is a participant
+    try:
+        conv_obj_id = ObjectId(conv_id)
+    except Exception:
+        return jsonify({"error": "Invalid conversation_id"}), 400
+
+    conv = conversations.find_one({"_id": conv_obj_id})
+    if not conv:
+        return jsonify({"error": "Conversation not found"}), 404
+
+    if user_id not in conv.get("participants", []):
+        return jsonify({"error": "User not a participant in conversation"}), 403
+
+    # Fetch messages for conversation (ascending)
+    try:
+        msgs_cursor = messages.find({"conversation_id": conv_obj_id}).sort("timestamp", 1)
+    except Exception as e:
+        return jsonify({"error": "Failed to query messages: " + str(e)}), 500
+
+    out = []
+    for m in msgs_cursor:
+        sender_id = m.get("sender_id")
+        is_sender = (sender_id == user_id)
+
+        # If caller is sender -> show original_text
+        if is_sender:
+            display_text = m.get("original_text")
+            display_lang = m.get("original_language") or ""
+        else:
+            # message from other participant: prefer translated_text if it matches user's language
+            msg_trans_lang = m.get("translated_language") or ""
+            if msg_trans_lang == user_lang and m.get("translated_text"):
+                display_text = m.get("translated_text")
+                display_lang = msg_trans_lang
+            else:
+                # Need to translate into user's language (if translator available)
+                orig = m.get("original_text")
+                if translator is not None and user_lang:
+                    try:
+                        new_trans = translator.translate_with_context(orig, None, user_lang)
+                        # persist the new translation for this message
+                        try:
+                            messages.update_one({"_id": m.get("_id")}, {"$set": {"translated_language": user_lang, "translated_text": new_trans}})
+                        except Exception:
+                            pass
+                        display_text = new_trans
+                        display_lang = user_lang
+                    except Exception:
+                        # translation failed -> fall back to original
+                        display_text = orig
+                        display_lang = m.get("original_language") or ""
+                else:
+                    # translator not available or user_lang not set -> show original
+                    display_text = m.get("original_text")
+                    display_lang = m.get("original_language") or ""
+
+        out.append({
+            "message_id": str(m.get("_id")),
+            "conversation_id": str(m.get("conversation_id")),
+            "sender_id": str(m.get("sender_id")),
+            "timestamp": m.get("timestamp").isoformat() if m.get("timestamp") else None,
+            "language": display_lang,
+            "text": display_text,
+        })
+
+    return jsonify({"messages": out}), 200
 # translate endpoint
 @app.route("/translate", methods = ["GET"])
 def translate():
