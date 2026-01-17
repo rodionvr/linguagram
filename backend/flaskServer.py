@@ -51,9 +51,9 @@ if _mongo_uri:
         _mongo_client = None
 
 
-def _get_users_collection():
+def _get_accounts_collection():
     if _mongo_client:
-        return _mongo_client[_mongo_db]["users"]
+        return _mongo_client[_mongo_db]["accounts"]
     return None
 
 
@@ -68,31 +68,29 @@ def login():
     if not email:
         return jsonify({"error": "Missing 'email' parameter"}), 400
 
-    users = _get_users_collection()
-    if users is None:
+    accounts = _get_accounts_collection()
+    if accounts is None:
         return jsonify({"error": "Database not configured. Set MONGO_URI in environment or backend/.env"}), 500
 
     # Check for existing account by email (index Email_1 assumed present)
-    existing = users.find_one({"email": email})
+    existing = accounts.find_one({"email": email})
     if existing:
-        # account exists — return user data (omit sensitive fields)
         existing.pop("_id", None)
         return jsonify({"created": False, "user": existing}), 200
 
-    # Create new account
+    # Create new account document inserted into `accounts` collection
     user_doc = {
-        "Username": username or "",
-        "Email": email,
-        "Friends": [],
-        "Language": "",
+        "username": username or "",
+        "email": email,
+        "friends": [],
+        "language": "",
     }
 
     try:
-        users.insert_one(user_doc)
+        accounts.insert_one(user_doc)
     except Exception as e:
-        return jsonify({"error": "Failed to create user: " + str(e)}), 500
+        return jsonify({"error": "Failed to create account: " + str(e)}), 500
 
-    # remove _id for response or convert to str if preferred
     user_doc.pop("_id", None)
     return jsonify({"created": True, "user": user_doc}), 201
 
