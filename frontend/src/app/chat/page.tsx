@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, FormEvent, ChangeEvent } from "react";
+import { useState, useEffect, useRef, FormEvent, ChangeEvent } from "react";
 
 interface Message {
   id: string;
@@ -17,6 +17,8 @@ export default function ChatPage() {
   ); // твой email
 
   const backend = process.env.BACKEND_URL || "http://localhost:5000"; // адрес Flask
+  const socketRef = useRef<any>(null);
+  const [conversationId, setConversationId] = useState<string | null>(null);
 
   // Отправка сообщения
   const sendMessage = async (e: FormEvent<HTMLFormElement>) => {
@@ -31,7 +33,20 @@ export default function ChatPage() {
       error?: string;
     }
 
+    // Prefer websocket if connected
     try {
+      if (socketRef.current && socketRef.current.connected) {
+        socketRef.current.emit("send_message", {
+          message,
+          email: userEmail,
+          target_email: targetEmail,
+          conversation_id: conversationId,
+        });
+        setMessage("");
+        return;
+      }
+
+      // Fallback to REST if socket unavailable
       const res = await fetch(`${backend}/message`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -54,16 +69,62 @@ export default function ChatPage() {
           ...prev,
           { text: message, id: data.message_id },
         ]);
+        setConversationId(data.conversation_id || conversationId);
         setMessage(""); // очистка поля
       } else {
         console.error("Message failed:", data);
         alert(data.error || "Error sending message");
       }
     } catch (err) {
-      console.error("Fetch failed:", err);
-      alert("Failed to send message" + err);
+      console.error("Send failed:", err);
+      alert("Failed to send message: " + err);
     }
   };
+
+  // Setup Socket.IO client
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const { io } = await import("socket.io-client");
+        if (!mounted) return;
+        const socket = io(backend, { transports: ["websocket"] });
+        socketRef.current = socket;
+
+        socket.on("connect", () => {
+          console.debug("socket connected", socket.id);
+        });
+
+        socket.on("message", (data: any) => {
+          // data: { message_id, conversation_id, sender_id, timestamp, original_text, translated_text }
+          const text = data.translated_text || data.original_text || data.text || "";
+          const id = data.message_id || String(Date.now());
+          setMessages((prev) => [...prev, { id, text }]);
+          if (!conversationId && data.conversation_id) {
+            setConversationId(data.conversation_id);
+          }
+        });
+
+        socket.on("joined", (d: any) => {
+          // optionally handle joined
+          if (d && d.conversation_id && !conversationId) setConversationId(d.conversation_id);
+        });
+
+        socket.on("connect_error", (err: any) => {
+          console.warn("socket connect error", err);
+        });
+      } catch (e) {
+        console.warn("Socket.IO client not available, falling back to REST", e);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+      try {
+        socketRef.current?.disconnect();
+      } catch (e) {}
+    };
+  }, [backend]);
 
   return (
     <div className="flex flex-col items-center justify-start h-screen p-4 gap-4">
