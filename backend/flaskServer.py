@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify, flash, render_template, redirect, url_for
+from flask_cors import CORS
 from flask_login import login_user, login_required, logout_user
 import os
 from datetime import datetime
@@ -8,6 +9,9 @@ from bson import ObjectId
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "placeholder")
+
+# Enable CORS for frontend development (allow all origins for now)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 try:
     import translator
@@ -104,7 +108,6 @@ def login():
     return jsonify({"created": True, "user": user_doc}), 201
 
 @app.route("/message", methods=["POST"])
-@login_required
 def message():
     data = request.get_json(silent=True)
     message_text = data.get("message")
@@ -137,7 +140,7 @@ def message():
         if not conv:
             conv_doc = {
                 "participants": [sender_id, target_id],
-                "created_at": datetime.utcnow(),
+                "created_at": datetime.now(),
                 "latest": None,
             }
             conv_result = conversations.insert_one(conv_doc)
@@ -202,7 +205,6 @@ def logout():
     return redirect(url_for("login"))
 
 @app.route("/getConvs", methods = ["GET"])
-@login_required
 def get_conversations():
     user_email = request.args.get("email")
     if not user_email:
@@ -232,7 +234,6 @@ def get_conversations():
     return jsonify({"conversations": convs_list}), 200
 
 @app.route("/getMessages", methods = ["GET"])
-@login_required
 def get_messages():
     # Expected query params: email (caller email), conversation_id
     user_email = request.args.get("email")

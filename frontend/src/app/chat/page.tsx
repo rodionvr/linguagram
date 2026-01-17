@@ -61,7 +61,7 @@ export default function ChatPage() {
       }
     } catch (err) {
       console.error("Fetch failed:", err);
-      alert("Failed to send message");
+      alert("Failed to send message" + err);
     }
   };
 
