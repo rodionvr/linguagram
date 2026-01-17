@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify, flash, render_template, redirect, url_for
 from flask_cors import CORS
 from flask_login import login_user, login_required, logout_user
-from flask_socketio import SocketIO, join_room, leave_room, emit
+from flask_socketio import SocketIO, join_room, leave_room, emit, rooms
 import os
 from datetime import datetime
 from pymongo import MongoClient
@@ -16,6 +16,9 @@ CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # Socket.IO for realtime chat
 socketio = SocketIO(app, cors_allowed_origins="*")
+
+# map email -> set of socket session ids
+connected_users = {}
 
 try:
     import translator
@@ -74,6 +77,17 @@ def _get_messages_collection():
     if _mongo_client:
         return _mongo_client[_mongo_db]["messages"]
     return None
+
+@app.route("/getEmail", methods=["GET"])
+def get_email():
+    id = request.args.get("id")
+    accounts = _get_accounts_collection()
+    if accounts is None:
+        return jsonify({"error": "Database not configured. Set MONGO_URI in environment or backend/.env"}), 500
+    user = accounts.find_one({"_id": ObjectId(id)})
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify({"email": user.get("email")}), 200
 
 # login endpoint
 @app.route("/login", methods=["GET", "POST"])
@@ -196,6 +210,27 @@ def message():
         conversations.update_one({"_id": conv_id}, {"$set": {"latest": latest_info, "updated_at": datetime.utcnow()}})
     except Exception:
         # non-fatal: message already saved
+        pass
+
+    # Emit message via Socket.IO to conversation room so connected clients receive it
+    try:
+        out_msg = {
+            "message_id": str(msg_res.inserted_id),
+            "conversation_id": str(conv_id),
+            "sender_id": str(sender_id),
+            "sender_email": user_email,
+            "target_email": target_email,
+            "timestamp": msg_doc["timestamp"].isoformat(),
+            "original_text": message_text,
+            "translated_text": translated_text,
+            "translated_language": recv_lang or "",
+        }
+        room_name = str(conv_id)
+        try:
+            socketio.emit("message", out_msg, room=room_name)
+        except Exception:
+            pass
+    except Exception:
         pass
 
     return jsonify({"message": "Message added successfully", "message_id": str(msg_res.inserted_id), "conversation_id": str(conv_id)}), 201
@@ -355,18 +390,53 @@ if __name__ == "__main__":
 def handle_join(data):
     """Client sends {conversation_id, email} to join a room for that conversation."""
     conv_id = data.get("conversation_id")
+    email = data.get("email")
     if not conv_id:
         return
     join_room(conv_id)
+    # register sid for email if provided
+    if email:
+        s = connected_users.get(email) or set()
+        s.add(request.sid)
+        connected_users[email] = s
     emit("joined", {"conversation_id": conv_id}, room=conv_id)
 
 
 @socketio.on("leave")
 def handle_leave(data):
     conv_id = data.get("conversation_id")
+    email = data.get("email")
     if not conv_id:
         return
     leave_room(conv_id)
+    if email:
+        s = connected_users.get(email)
+        if s and request.sid in s:
+            s.discard(request.sid)
+            if not s:
+                connected_users.pop(email, None)
+
+
+@socketio.on("register")
+def handle_register(data):
+    # client tells server its email so server can target direct messages
+    email = data.get("email")
+    if not email:
+        return
+    s = connected_users.get(email) or set()
+    s.add(request.sid)
+    connected_users[email] = s
+
+
+@socketio.on("disconnect")
+def handle_disconnect():
+    # remove this sid from any email mappings
+    sid = request.sid
+    for email, sids in list(connected_users.items()):
+        if sid in sids:
+            sids.discard(sid)
+            if not sids:
+                connected_users.pop(email, None)
 
 
 @socketio.on("send_message")
@@ -463,12 +533,35 @@ def handle_send_message(data):
         "message_id": str(msg_res.inserted_id),
         "conversation_id": str(conv_obj_id),
         "sender_id": str(sender_id),
+        "sender_email": user_email,
+        "target_email": target_email,
         "timestamp": msg_doc["timestamp"].isoformat(),
         "original_text": message_text,
         "translated_text": translated_text,
         "translated_language": recv_lang or "",
     }
 
-    # emit to room
+    # emit to conversation room
     room_name = str(conv_obj_id)
-    emit("message", out_msg, room=room_name)
+    try:
+        emit("message", out_msg, room=room_name)
+    except Exception:
+        pass
+
+    # send directly to connected recipient(s) if available (they may not have joined the room yet)
+    try:
+        target_sids = connected_users.get(target_email) or set()
+        for sid in list(target_sids):
+            try:
+                emit("message", out_msg, room=sid)
+            except Exception:
+                pass
+        # also ensure sender sid receives it
+        sender_sids = connected_users.get(user_email) or set()
+        for sid in list(sender_sids):
+            try:
+                emit("message", out_msg, room=sid)
+            except Exception:
+                pass
+    except Exception:
+        pass

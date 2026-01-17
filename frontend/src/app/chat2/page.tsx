@@ -10,10 +10,10 @@ export default function ChatPage() {
   const [message, setMessage] = useState<string>("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [targetEmail, setTargetEmail] = useState<string>(
-    "rodion.varlamovgg@gmail.com",
+    "patillumaniti@gmail.com",
   );
   const [userEmail, setUserEmail] = useState<string>(
-    "patillumaniti@gmail.com",
+    "rodion.varlamovgg@gmail.com",
   ); // твой email
 
   const backend = process.env.BACKEND_URL || "http://localhost:5000"; // адрес Flask
@@ -68,9 +68,7 @@ export default function ChatPage() {
 
       if (res.ok && data.message_id) {
         setConversationId(data.conversation_id || conversationId);
-        // persist conversation id so refresh keeps it
         if (data.conversation_id) localStorage.setItem(convStorageKey, data.conversation_id);
-        // append only if socket not connected (no real-time delivery)
         if (!socketRef.current || !socketRef.current.connected) {
           const newMsg = { text: message, id: data.message_id };
           setMessages((prev) => {
@@ -92,11 +90,9 @@ export default function ChatPage() {
   // Setup Socket.IO client
   useEffect(() => {
     let mounted = true;
-    // load stored conversation id and messages
+    // restore conversation id from storage
     const stored = localStorage.getItem(convStorageKey);
-    if (stored && !conversationId) {
-      setConversationId(stored);
-    }
+    if (stored && !conversationId) setConversationId(stored);
     (async () => {
       try {
         const { io } = await import("socket.io-client");
@@ -106,11 +102,9 @@ export default function ChatPage() {
 
         socket.on("connect", () => {
           console.debug("socket connected", socket.id);
-          // register this client identity with server for direct deliveries
           try {
             socket.emit("register", { email: userEmail });
           } catch (e) {}
-          // if we already have a conversation, join its room so we receive events
           if (conversationId) {
             try {
               socket.emit("join", { conversation_id: conversationId, email: userEmail });
@@ -120,7 +114,6 @@ export default function ChatPage() {
 
         socket.on("message", (data: any) => {
           // data: { message_id, conversation_id, sender_id, timestamp, original_text, translated_text }
-          // if this client is the sender, show original_text; otherwise show translated_text when available
           const isSender = data.sender_email && data.sender_email === userEmail;
           const text = isSender ? (data.original_text || data.text || data.translated_text || "") : (data.translated_text || data.original_text || data.text || "");
           const id = data.message_id || String(Date.now());
@@ -131,7 +124,6 @@ export default function ChatPage() {
           });
           if (!conversationId && data.conversation_id) {
             setConversationId(data.conversation_id);
-            // persist and join the room for subsequent messages
             try {
               localStorage.setItem(convStorageKey, data.conversation_id);
             } catch (e) {}
@@ -142,7 +134,7 @@ export default function ChatPage() {
         });
 
         socket.on("joined", (d: any) => {
-          // server confirmed join; capture conversation id if provided
+          // optionally handle joined
           if (d && d.conversation_id && !conversationId) setConversationId(d.conversation_id);
         });
 
@@ -160,43 +152,39 @@ export default function ChatPage() {
         socketRef.current?.disconnect();
       } catch (e) {}
     };
-  }, [backend]);
+    }, [backend]);
 
-  // When conversationId is obtained (e.g., REST created it), join the room
-  useEffect(() => {
-    if (!conversationId) return;
-    // persist
-    try {
-      localStorage.setItem(convStorageKey, conversationId);
-    } catch (e) {}
-    // fetch existing messages for this conversation
-    (async () => {
+    useEffect(() => {
+      if (!conversationId) return;
       try {
-        const res = await fetch(
-          `${backend}/getMessages?email=${encodeURIComponent(userEmail)}&conversation_id=${encodeURIComponent(conversationId)}`
-        );
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.messages) {
-            // dedupe by id
-            const map = new Map<string, string>();
-            for (const m of data.messages) map.set(m.message_id, m.text);
-            setMessages(Array.from(map.entries()).map(([id, text]) => ({ id, text })));
+        localStorage.setItem(convStorageKey, conversationId);
+      } catch (e) {}
+
+      (async () => {
+        try {
+          const res = await fetch(
+            `${backend}/getMessages?email=${encodeURIComponent(userEmail)}&conversation_id=${encodeURIComponent(conversationId)}`
+          );
+          if (res.ok) {
+            const data = await res.json();
+            if (data && data.messages) {
+              const map = new Map<string, string>();
+              for (const m of data.messages) map.set(m.message_id, m.text);
+              setMessages(Array.from(map.entries()).map(([id, text]) => ({ id, text })));
+            }
           }
+        } catch (e) {
+          console.warn("Failed to load messages", e);
         }
-      } catch (e) {
-        console.warn("Failed to load messages", e);
-      }
-    })();
-    try {
-      const s = socketRef.current;
-      if (s && s.connected) {
-        s.emit("join", { conversation_id: conversationId, email: userEmail });
-      }
-    } catch (e) {
-      // ignore
-    }
-  }, [conversationId, userEmail]);
+      })();
+
+      try {
+        const s = socketRef.current;
+        if (s && s.connected) {
+          s.emit("join", { conversation_id: conversationId, email: userEmail });
+        }
+      } catch (e) {}
+    }, [conversationId, userEmail]);
 
   return (
     <div className="flex flex-col items-center justify-start h-screen p-4 gap-4">
