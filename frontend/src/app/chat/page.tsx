@@ -10,10 +10,10 @@ export default function ChatPage() {
   const [message, setMessage] = useState<string>("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [targetEmail, setTargetEmail] = useState<string>(
-    "patillumaniti@gmail.com",
+    "rodion.varlamovgg@gmail.com",
   );
   const [userEmail, setUserEmail] = useState<string>(
-    "rodion.varlamovgg@gmail.com",
+    "patillumaniti@gmail.com",
   ); // твой email
 
   const backend = process.env.BACKEND_URL || "http://localhost:5000"; // адрес Flask

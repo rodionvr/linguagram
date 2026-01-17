@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, flash, render_template, redirect, url_for
 from flask_cors import CORS
 from flask_login import login_user, login_required, logout_user
+from flask_socketio import SocketIO, join_room, leave_room, emit
 import os
 from datetime import datetime
 from pymongo import MongoClient
@@ -12,6 +13,9 @@ app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "placeholder")
 
 # Enable CORS for frontend development (allow all origins for now)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+
+# Socket.IO for realtime chat
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 try:
     import translator
@@ -340,4 +344,131 @@ def translate():
    })
 
 if __name__ == "__main__":
-    app.run(debug = True)
+    # Use SocketIO runner so websocket handlers work
+    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+
+
+# --- Socket.IO event handlers ---
+
+
+@socketio.on("join")
+def handle_join(data):
+    """Client sends {conversation_id, email} to join a room for that conversation."""
+    conv_id = data.get("conversation_id")
+    if not conv_id:
+        return
+    join_room(conv_id)
+    emit("joined", {"conversation_id": conv_id}, room=conv_id)
+
+
+@socketio.on("leave")
+def handle_leave(data):
+    conv_id = data.get("conversation_id")
+    if not conv_id:
+        return
+    leave_room(conv_id)
+
+
+@socketio.on("send_message")
+def handle_send_message(data):
+    """Expect data: {message, email, target_email, conversation_id (optional)}
+    Will create/find conversation, persist message, update conversation.latest,
+    and emit 'message' event to the conversation room with the stored message.
+    """
+    message_text = data.get("message")
+    user_email = data.get("email")
+    target_email = data.get("target_email")
+    conv_id = data.get("conversation_id")
+
+    if not message_text or not user_email or not target_email:
+        emit("error", {"error": "Missing parameters"})
+        return
+
+    accounts = _get_accounts_collection()
+    conversations = _get_conversations_collection()
+    messages = _get_messages_collection()
+    if accounts is None or conversations is None or messages is None:
+        emit("error", {"error": "Database not configured"})
+        return
+
+    user = accounts.find_one({"email": user_email})
+    target = accounts.find_one({"email": target_email})
+    if not user or not target:
+        emit("error", {"error": "User or target not found"})
+        return
+
+    sender_id = user.get("_id")
+    target_id = target.get("_id")
+
+    # Use provided conversation_id if valid, otherwise find or create
+    conv_obj_id = None
+    if conv_id:
+        try:
+            conv_obj_id = ObjectId(conv_id)
+        except Exception:
+            conv_obj_id = None
+
+    try:
+        if conv_obj_id:
+            conv = conversations.find_one({"_id": conv_obj_id})
+            if not conv:
+                conv_obj_id = None
+        if not conv_obj_id:
+            conv = conversations.find_one({"participants": {"$all": [sender_id, target_id]}})
+            if not conv:
+                conv_doc = {"participants": [sender_id, target_id], "created_at": datetime.utcnow(), "latest": None}
+                conv_res = conversations.insert_one(conv_doc)
+                conv_obj_id = conv_res.inserted_id
+            else:
+                conv_obj_id = conv.get("_id")
+    except Exception as e:
+        emit("error", {"error": f"Failed to find/create conversation: {e}"})
+        return
+
+    recv_lang = target.get("language") or None
+
+    # translation
+    translated_text = message_text
+    try:
+        if translator is not None and recv_lang:
+            translated_text = translator.translate_with_context(message_text, None, recv_lang)
+    except Exception:
+        translated_text = message_text
+
+    # create message doc
+    msg_doc = {
+        "conversation_id": conv_obj_id,
+        "sender_id": sender_id,
+        "timestamp": datetime.utcnow(),
+        "original_language": user.get("language", ""),
+        "original_text": message_text,
+        "translated_language": recv_lang or "",
+        "translated_text": translated_text,
+    }
+
+    try:
+        msg_res = messages.insert_one(msg_doc)
+    except Exception as e:
+        emit("error", {"error": f"Failed to insert message: {e}"})
+        return
+
+    # update conversation latest
+    try:
+        latest_info = {"timestamp": msg_doc["timestamp"], "language": recv_lang or "", "sender_id": sender_id, "message_id": msg_res.inserted_id}
+        conversations.update_one({"_id": conv_obj_id}, {"$set": {"latest": latest_info, "updated_at": datetime.utcnow()}})
+    except Exception:
+        pass
+
+    out_msg = {
+        "message_id": str(msg_res.inserted_id),
+        "conversation_id": str(conv_obj_id),
+        "sender_id": str(sender_id),
+        "timestamp": msg_doc["timestamp"].isoformat(),
+        "original_text": message_text,
+        "translated_text": translated_text,
+        "translated_language": recv_lang or "",
+    }
+
+    # emit to room
+    room_name = str(conv_obj_id)
+    emit("message", out_msg, room=room_name)
