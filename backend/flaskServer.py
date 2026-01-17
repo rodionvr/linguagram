@@ -3,6 +3,7 @@ from flask_login import login_user, login_required, logout_user
 import os
 from datetime import datetime
 from pymongo import MongoClient
+from bson import ObjectId
 
 
 app = Flask(__name__)
@@ -56,6 +57,15 @@ def _get_accounts_collection():
         return _mongo_client[_mongo_db]["accounts"]
     return None
 
+def _get_conversations_collection():
+    if _mongo_client:
+        return _mongo_client[_mongo_db]["conversations"]
+    return None
+
+def _get_messages_collection():
+    if _mongo_client:
+        return _mongo_client[_mongo_db]["messages"]
+    return None
 
 # login endpoint
 @app.route("/login", methods=["GET", "POST"])
@@ -93,6 +103,95 @@ def login():
 
     user_doc.pop("_id", None)
     return jsonify({"created": True, "user": user_doc}), 201
+
+@app.route("/message", methods=["POST"])
+def message():
+    data = request.get_json(silent=True)
+    message_text = data.get("message")
+    user_email = data.get("email")
+    target_email = data.get("target_email")
+
+    if not message_text or not user_email or not target_email:
+        return jsonify({"error": "Missing 'message', 'email', or 'target_email' parameter"}), 400
+
+    accounts = _get_accounts_collection()
+    conversations = _get_conversations_collection()
+    messages = _get_messages_collection()
+    if accounts is None or conversations is None or messages is None:
+        return jsonify({"error": "Database not configured. Set MONGO_URI in environment or backend/.env"}), 500
+
+    # Find the user by email
+    user = accounts.find_one({"email": user_email})
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    target = accounts.find_one({"email": target_email})
+    if not target:
+        return jsonify({"error": "Target user not found"}), 404
+    # Determine participant ids
+    sender_id = user.get("_id")
+    target_id = target.get("_id")
+
+    # Find or create a conversation between the two participants
+    try:
+        conv = conversations.find_one({"participants": {"$all": [sender_id, target_id]}})
+        if not conv:
+            conv_doc = {
+                "participants": [sender_id, target_id],
+                "created_at": datetime.utcnow(),
+                "latest": None,
+            }
+            conv_result = conversations.insert_one(conv_doc)
+            conv_id = conv_result.inserted_id
+        else:
+            conv_id = conv.get("_id")
+    except Exception as e:
+        return jsonify({"error": "Failed to find/create conversation: " + str(e)}), 500
+
+    # Determine recipient language (from their account) for translation
+    recv_lang = target.get("language") or None
+
+    # Perform translation if translator available and recv_lang provided
+    translated_text = None
+    try:
+        if translator is not None and recv_lang:
+            # translator.translate_with_context(new_message, prev_messages, target_language)
+            translated_text = translator.translate_with_context(message_text, None, recv_lang)
+        else:
+            translated_text = message_text
+    except Exception:
+        # fallback to original text on translation failure
+        translated_text = message_text
+
+    # Create message document
+    msg_doc = {
+        "conversation_id": conv_id,
+        "sender_id": sender_id,
+        "timestamp": datetime.now(),
+        "original_language": user.get("language", ""),
+        "original_text": message_text,
+        "translated_language": recv_lang or "",
+        "translated_text": translated_text,
+    }
+
+    try:
+        msg_res = messages.insert_one(msg_doc)
+    except Exception as e:
+        return jsonify({"error": "Failed to insert message: " + str(e)}), 500
+
+    # Update conversation's latest message metadata
+    try:
+        latest_info = {
+            "timestamp": msg_doc["timestamp"],
+            "language": recv_lang or "",
+            "sender_id": sender_id,
+            "message_id": msg_res.inserted_id,
+        }
+        conversations.update_one({"_id": conv_id}, {"$set": {"latest": latest_info, "updated_at": datetime.utcnow()}})
+    except Exception:
+        # non-fatal: message already saved
+        pass
+
+    return jsonify({"message": "Message added successfully", "message_id": str(msg_res.inserted_id), "conversation_id": str(conv_id)}), 201
 
 # logout endpoint
 @app.route("/logout", methods=["GET"])
