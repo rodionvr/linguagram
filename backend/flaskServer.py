@@ -1,68 +1,109 @@
 from flask import Flask, request, jsonify, flash, render_template, redirect, url_for
 from flask_login import login_user, login_required, logout_user
-from werkzeug.security import check_password_hash, generate_password_hash
-import translator
-from forms import LoginForm, RegisterForm
+import os
+from datetime import datetime
+from pymongo import MongoClient
+
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "placeholder"
+app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "placeholder")
+
+try:
+    import translator
+except Exception:
+    translator = None
 
 
+# Load a local .env next to this file if present (simple loader)
+def _load_local_env():
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if not os.path.exists(env_path):
+        return
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                key = key.strip()
+                val = val.strip()
+                if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                    val = val[1:-1]
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except Exception:
+        pass
 
-# register endpoint
-@app.route("/register", methods = ["GET", "POST"])
-def register():
-    form = RegisterForm()
-    if form.validate_on_submit():
-        user = users_collection.find_one({"email": form.email.data})
-        if user:
-            flash("Email already registered. Please try again.", "error")
-        else:
-            if form.validate_on_submit():
-                # Create new user
-                new_user = {
-                    "username": form.username.data,
-                    "email": form.email.data,
-                    "password": generate_password_hash(form.password.data)
-                }
-                users_collection.insert_one(new_user)
-                flash("Registration successful!", "success")
-                return redirect(url_for("login"))
 
-    return render_template("register.html", form=form)
+_load_local_env()
+
+# Mongo setup
+_mongo_uri = os.environ.get("MONGO_URI") or os.environ.get("MONGODB_URI")
+_mongo_db = os.environ.get("MONGO_DB_NAME", "linguagram")
+_mongo_client = None
+if _mongo_uri:
+    try:
+        _mongo_client = MongoClient(_mongo_uri)
+    except Exception:
+        _mongo_client = None
+
+
+def _get_users_collection():
+    if _mongo_client:
+        return _mongo_client[_mongo_db]["users"]
+    return None
 
 
 # login endpoint
-@app.route("/login", methods = ["POST"])
+@app.route("/login", methods=["GET", "POST"])
 def login():
-    form = LoginForm()
-    if form.validate_on_submit():
-        user = users_collection.find_one({"email": form.email.data})
-        if not user:
-            flash("Email not found. Please try again.", "error")
-        else:
-            if check_password_hash(user.password, form.password.data):
-                login_user(user)
-                flash("Login successful!", "success")
-                return redirect(url_for("login"))
-            else:
-                flash("Incorrect password. Please try again.", "error")
+    # Accept either query params or JSON body
+    data = request.get_json(silent=True) or request.args
+    username = data.get("name")
+    email = data.get("email")
 
-        return render_template("login.html", form=form)
+    if not email:
+        return jsonify({"error": "Missing 'email' parameter"}), 400
 
+    users = _get_users_collection()
+    if users is None:
+        return jsonify({"error": "Database not configured. Set MONGO_URI in environment or backend/.env"}), 500
+
+    # Check for existing account by email (index Email_1 assumed present)
+    existing = users.find_one({"email": email})
+    if existing:
+        # account exists — return user data (omit sensitive fields)
+        existing.pop("_id", None)
+        return jsonify({"created": False, "user": existing}), 200
+
+    # Create new account
+    user_doc = {
+        "Username": username or "",
+        "Email": email,
+        "Friends": [],
+        "Language": "",
+    }
+
+    try:
+        users.insert_one(user_doc)
+    except Exception as e:
+        return jsonify({"error": "Failed to create user: " + str(e)}), 500
+
+    # remove _id for response or convert to str if preferred
+    user_doc.pop("_id", None)
+    return jsonify({"created": True, "user": user_doc}), 201
 
 # logout endpoint
-@app.route("/logout", methods = ["GET"])
+@app.route("/logout", methods=["GET"])
 @login_required
 def logout():
     logout_user()
-    flash("Logged out successfully","success")
+    flash("Logged out successfully", "success")
     return redirect(url_for("login"))
 
-
-
-# timestamp endpoint
-@app.route()
 
 
 
@@ -84,17 +125,6 @@ def translate():
     return jsonify({
        "translatedMessage": translated
    })
-
-# store in database --- MongoDB
-#translation_doc = {
- #   "original_message": new_message,
-  #  "target_language": target_language,
-   # "translated_message": translated
-    #"timestamp": datetime.utcnow(),
-#}
-
-#translations_collection.insert_one(translation_doc)
-
 
 if __name__ == "__main__":
     app.run(debug = True)
