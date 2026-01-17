@@ -66,11 +66,10 @@ def translate_with_context(new_message: str, prev_messages: Optional[List[str]],
    # Keep only last 4 messages if more provided
    if len(prev_messages) > 4:
       prev_messages = prev_messages[-4:]
-
    context_block = "\n".join(f"- {m}" for m in prev_messages) if prev_messages else "(no prior messages)"
 
    prompt = (
-      "You are a helpful translator assistant.\n"
+      "You are a helpful translator assistant for a messaging app.\n"
       f"Previous messages (most recent last):\n{context_block}\n\n"
       f"Translate the following new message into {target_language}. Preserve meaning and tone.\n\n"
       f"Message:\n{new_message}\n\n"

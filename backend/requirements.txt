@@ -1,5 +1,7 @@
-flask   
+flask
+flask-wtf
 google-genai
 pymongo
-python-dotenv
 flask-cors
+python-dotenv
+....
