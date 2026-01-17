@@ -4,4 +4,6 @@ google-genai
 pymongo
 flask-cors
 python-dotenv
+flask-socketio
+flask-login
 ....

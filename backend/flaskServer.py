@@ -92,7 +92,6 @@ def login():
     user_doc = {
         "username": username or "",
         "email": email,
-        "friends": [],
         "language": "",
     }
 
@@ -105,6 +104,7 @@ def login():
     return jsonify({"created": True, "user": user_doc}), 201
 
 @app.route("/message", methods=["POST"])
+@login_required
 def message():
     data = request.get_json(silent=True)
     message_text = data.get("message")
@@ -201,9 +201,35 @@ def logout():
     flash("Logged out successfully", "success")
     return redirect(url_for("login"))
 
+@app.route("/getConvs", methods = ["GET"])
+@login_required
+def get_conversations():
+    user_email = request.args.get("email")
+    if not user_email:
+        return jsonify({"error": "Missing 'email' parameter"}), 400
 
+    accounts = _get_accounts_collection()
+    conversations = _get_conversations_collection()
+    if accounts is None or conversations is None:
+        return jsonify({"error": "Database not configured. Set MONGO_URI in environment or backend/.env"}), 500
 
+    # Find the user by email
+    user = accounts.find_one({"email": user_email})
+    if not user:
+        return jsonify({"error": "User not found"}), 404
 
+    user_id = user.get("_id")
+
+    try:
+        convs_cursor = conversations.find({"participants": user_id}).sort("updated_at", -1)
+        convs_list = []
+        for conv in convs_cursor:
+            conv["_id"] = str(conv["_id"])
+            convs_list.append(conv)
+    except Exception as e:
+        return jsonify({"error": "Failed to retrieve conversations: " + str(e)}), 500
+
+    return jsonify({"conversations": convs_list}), 200
 
 # translate endpoint
 @app.route("/translate", methods = ["GET"])
