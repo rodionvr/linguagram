@@ -7,6 +7,19 @@ export default async function Secret() {
 
   if (!session) return redirect("/profile");
 
+  // Call backend /login endpoint server-side with name and email
+  try {
+    const backend = process.env.BACKEND_URL || "http://localhost:5000";
+    await fetch(`${backend}/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: user?.name, email: user?.email }),
+    });
+  } catch (e) {
+    // non-fatal: continue rendering even if backend call fails
+    console.error("Backend login call failed:", e);
+  }
+
   return (
     <>
       <h1>Welcome to the messenger, {user?.name}</h1>
