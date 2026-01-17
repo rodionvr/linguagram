@@ -13,18 +13,19 @@ export default async function SignIn() {
           await signOut();
         }}
       >
-        <button type="submit" className="p-2 border-2 bg-blue-400">Signout</button>
+        <button type="submit" className="p-2 border-2 bg-red-400">Signout</button>
       </form>
     </>
   ) : (
     <>
       <form
+        className="flex flex-col items-center justify-center gap-4"
         action={async () => {
           "use server";
           await signIn("google", { redirectTo: '/secret'});
         }}
       >
-        <button type="submit" className="mx-auto">Signin with Google</button>
+        <button type="submit" className="m-auto border-2 p-2 bg-green-400">Signin with Google</button>
       </form>
     </>
   );
