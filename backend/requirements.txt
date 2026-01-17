@@ -1,4 +1,6 @@
 flask   
 google-genai
-
+pymongo
+flask-cors
+python-dotenv
 ....
