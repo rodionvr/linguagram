@@ -1,44 +1,158 @@
-import { auth, signIn, signOut } from "@/auth";
+"use client";
+import { signOut } from "next-auth/react";
 import { FcGoogle } from "react-icons/fc";
+import Link from "next/link";
+import { useState, useEffect } from "react";
 
-export default async function SignIn() {
-  const session = await auth();
+const LANGUAGES = [
+  "English",
+  "French",
+  "Russian",
+  "Spanish",
+  "German",
+  "Chinese",
+  "Japanese",
+  "Arabic",
+  "Portuguese",
+  "Italian",
+];
+
+export default function Profile() {
+  const [session, setSession] = useState<any>(null);
+  const [userLanguage, setUserLanguage] = useState<string | null>(null);
+  const [selectedLanguage, setSelectedLanguage] = useState<string>("");
+  const [loading, setLoading] = useState(true);
+  const backend = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:5000";
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/session");
+        if (res.ok) {
+          const data = await res.json();
+          setSession(data);
+          
+          if (data?.user?.email) {
+            // Fetch user data from backend to check language
+            const userRes = await fetch(`${backend}/login?email=${encodeURIComponent(data.user.email)}`);
+            if (userRes.ok) {
+              const userData = await userRes.json();
+              setUserLanguage(userData.user?.language || "");
+            }
+          }
+        }
+      } catch (e) {
+        console.error("Failed to fetch session or user data", e);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [backend]);
+
+  const handleLanguageSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedLanguage || !session?.user?.email) return;
+
+    try {
+      const res = await fetch(`${backend}/updateLanguage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: session.user.email, language: selectedLanguage }),
+      });
+
+      if (res.ok) {
+        setUserLanguage(selectedLanguage);
+      } else {
+        alert("Failed to update language");
+      }
+    } catch (e) {
+      console.error("Failed to update language", e);
+      alert("Failed to update language");
+    }
+  };
+
+  const handleSignIn = async () => {
+    const { signIn } = await import("next-auth/react");
+    await signIn("google", { callbackUrl: "/secret" });
+  };
+
+  const handleSignOut = async () => {
+    await signOut({ callbackUrl: "/profile" });
+  };
+
+  if (loading) {
+    return <div className="flex items-center justify-center h-screen">Loading...</div>;
+  }
+
   const user = session?.user;
-  console.log(session)
 
-  return user ? (
-    <>
-      <h1>Welcome {user.name}</h1>
-      <form
-        action={async () => {
-          "use server";
-          await signOut();
-        }}
-      >
-        <button type="submit" className="p-2 border-2 bg-red-400">
-          Signout
-        </button>
-      </form>
-    </>
-  ) : (
-    <>
+  if (!user) {
+    return (
       <div className="flex items-center justify-center h-screen">
-        <form
-          className="flex flex-col items-center gap-4"
-          action={async () => {
-            "use server";
-            await signIn("google", { redirectTo: "/secret" });
-          }}
-        >
+        <div className="flex flex-col items-center gap-4">
           <button
-            type="submit"
+            onClick={handleSignIn}
             className="px-10 py-3 bg-black flex items-center justify-center gap-1 rounded-md text-white cursor-pointer"
           >
             <FcGoogle className="w-5 h-5" />
             Signin with Google
           </button>
-        </form>
+        </div>
       </div>
-    </>
+    );
+  }
+
+  // Show language selection if user doesn't have a language set
+  if (!userLanguage) {
+    return (
+      <div className="flex items-center justify-center h-screen">
+        <div className="flex flex-col items-center gap-4 p-6 border rounded-lg bg-white shadow-lg max-w-md">
+          <h2 className="text-xl font-bold">Welcome, {user.name}!</h2>
+          <p className="text-gray-600">Please select your preferred language:</p>
+          <form onSubmit={handleLanguageSubmit} className="w-full flex flex-col gap-4">
+            <select
+              value={selectedLanguage}
+              onChange={(e) => setSelectedLanguage(e.target.value)}
+              className="w-full p-2 border rounded"
+              required
+            >
+              <option value="">Choose a language...</option>
+              {LANGUAGES.map((lang) => (
+                <option key={lang} value={lang}>
+                  {lang}
+                </option>
+              ))}
+            </select>
+            <button
+              type="submit"
+              className="w-full p-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+            >
+              Continue
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  // Normal profile view once language is set
+  return (
+    <div className="flex flex-col items-center justify-center h-screen gap-4">
+      <h1 className="text-2xl font-bold">Welcome {user.name}</h1>
+      <p className="text-gray-600">Language: {userLanguage}</p>
+      <div className="flex gap-2 mt-4">
+        <Link href="/chat">
+          <button className="p-2 border-2 bg-blue-500 text-white rounded">
+            Go to Chats
+          </button>
+        </Link>
+        <button
+          onClick={handleSignOut}
+          className="p-2 border-2 bg-red-400 rounded"
+        >
+          Signout
+        </button>
+      </div>
+    </div>
   );
 }

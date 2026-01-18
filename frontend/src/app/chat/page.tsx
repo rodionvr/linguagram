@@ -1,5 +1,7 @@
 "use client";
 import { useState, useEffect, useRef, FormEvent, ChangeEvent } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
 
 interface Message {
   id: string;
@@ -9,18 +11,47 @@ interface Message {
 export default function ChatPage() {
   const [message, setMessage] = useState<string>("");
   const [messages, setMessages] = useState<Message[]>([]);
-  const [targetEmail, setTargetEmail] = useState<string>(
-    "rodion.varlamovgg@gmail.com",
-  );
-  const [userEmail, setUserEmail] = useState<string>(
-    "patillumaniti@gmail.com",
-  ); // твой email
-
+  const [targetEmail, setTargetEmail] = useState<string>("");
+  const [userEmail, setUserEmail] = useState<string>("");
   const backend = process.env.BACKEND_URL || "http://localhost:5000"; // адрес Flask
   const socketRef = useRef<any>(null);
+  const userEmailRef = useRef<string>("");
   const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversations, setConversations] = useState<Array<any>>([]);
+  const [newContactEmail, setNewContactEmail] = useState<string>("");
+  const [loadingConvs, setLoadingConvs] = useState<boolean>(false);
 
   const convStorageKey = `conv:${[userEmail, targetEmail].sort().join(":")}`;
+
+  const router = useRouter();
+  const [authChecked, setAuthChecked] = useState(false);
+
+  // require signed-in user; redirect to /profile if not signed in
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/session");
+        if (!res.ok) {
+          router.push("/profile");
+          return;
+        }
+        const data = await res.json();
+        const email = data?.user?.email;
+        if (!email) {
+          router.push("/profile");
+          return;
+        }
+        setUserEmail(email);
+        userEmailRef.current = email;
+      } catch (e) {
+        router.push("/profile");
+      } finally {
+        setAuthChecked(true);
+      }
+    })();
+  }, [router]);
+
+  
 
   // Отправка сообщения
   const sendMessage = async (e: FormEvent<HTMLFormElement>) => {
@@ -121,7 +152,7 @@ export default function ChatPage() {
         socket.on("message", (data: any) => {
           // data: { message_id, conversation_id, sender_id, timestamp, original_text, translated_text }
           // if this client is the sender, show original_text; otherwise show translated_text when available
-          const isSender = data.sender_email && data.sender_email === userEmail;
+          const isSender = data.sender_email && data.sender_email === userEmailRef.current;
           const text = isSender ? (data.original_text || data.text || data.translated_text || "") : (data.translated_text || data.original_text || data.text || "");
           const id = data.message_id || String(Date.now());
           const newMsg = { id, text };
@@ -162,6 +193,74 @@ export default function ChatPage() {
     };
   }, [backend]);
 
+  // Fetch user's conversations when authenticated/userEmail is known
+  useEffect(() => {
+    if (!authChecked || !userEmail) return;
+    let mounted = true;
+    const fetchEmail = async (id: string) => {
+      try {
+        const res = await fetch(`${backend}/getEmail?id=${encodeURIComponent(id)}`);
+        if (!res.ok) return null;
+        const d = await res.json();
+        return d.email || null;
+      } catch (e) {
+        return null;
+      }
+    };
+
+    (async () => {
+      setLoadingConvs(true);
+      try {
+        const res = await fetch(`${backend}/getConvs?email=${encodeURIComponent(userEmail)}`);
+        if (!res.ok) {
+          setConversations([]);
+          setLoadingConvs(false);
+          return;
+        }
+        const data = await res.json();
+        const convs = data.conversations || [];
+
+        // For each conversation, resolve partner email(s)
+        const enriched = [] as any[];
+        for (const c of convs) {
+          try {
+            const participants = c.participants || [];
+            // call getEmail for each participant id to resolve email
+            const emails: Array<string> = [];
+            for (const p of participants) {
+              const idStr = typeof p === "string" ? p : (p && p.$oid) ? p.$oid : String(p);
+              const email = await fetchEmail(idStr);
+              if (email) emails.push(email);
+            }
+            // Determine partner email (one that isn't the current user)
+            const partnerEmail = emails.find((em) => em && em !== userEmail) || emails[0] || "";
+            enriched.push({ id: c._id || c.id || String(c["_id"]), partnerEmail, raw: c });
+          } catch (e) {
+            // skip problematic conv
+          }
+        }
+
+        if (!mounted) return;
+        setConversations(enriched);
+        // Auto-select the most recent conversation if available
+        if (enriched.length > 0 && !conversationId) {
+          const mostRecent = enriched[0];
+          setTargetEmail(mostRecent.partnerEmail);
+          setConversationId(mostRecent.id);
+        }
+      } catch (e) {
+        console.warn("Failed to load conversations", e);
+        setConversations([]);
+      } finally {
+        if (mounted) setLoadingConvs(false);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [authChecked, userEmail, backend]);
+
   // When conversationId is obtained (e.g., REST created it), join the room
   useEffect(() => {
     if (!conversationId) return;
@@ -198,41 +297,151 @@ export default function ChatPage() {
     }
   }, [conversationId, userEmail]);
 
+  if (!authChecked) return null;
+
+  // Derive display email from conversation if targetEmail not yet set
+  const currentConv = conversationId ? conversations.find(c => c.id === conversationId) : null;
+  const displayEmail = targetEmail || currentConv?.partnerEmail || "";
+
   return (
-    <div className="flex flex-col items-center justify-start h-screen p-4 gap-4">
-      <h1 className="text-2xl font-bold">Chat with {targetEmail}</h1>
+    <div className="flex h-screen">
+      {/* Sidebar */}
+      <aside className="w-80 border-r p-4 bg-white">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-medium">Conversations</h2>
+          <Link href="/profile">
+            <button className="text-sm text-blue-500 hover:text-blue-700">
+              Profile
+            </button>
+          </Link>
+        </div>
+        <div className="flex flex-col gap-2 mb-4">
+          {loadingConvs ? (
+            <div className="text-sm text-gray-500">Loading...</div>
+          ) : conversations.length === 0 ? (
+            <div className="text-sm text-gray-500">No conversations yet</div>
+          ) : (
+            conversations.map((c) => (
+              <button
+                key={c.id}
+                onClick={() => {
+                  const partner = c.partnerEmail || "";
+                  setTargetEmail(partner);
+                  // persist using canonical key
+                  const key = `conv:${[userEmail, partner].sort().join(":")}`;
+                  try {
+                    localStorage.setItem(key, c.id);
+                  } catch (e) {}
+                  setConversationId(c.id);
+                  setMessages([]);
+                }}
+                className="text-left p-2 rounded hover:bg-gray-100"
+              >
+                {c.partnerEmail || "(unknown)"}
+              </button>
+            ))
+          )}
+        </div>
 
-      <div className="flex flex-col gap-2 w-full max-w-md border p-4 rounded h-[60%] overflow-y-auto bg-gray-50">
-        {messages.map((msg) => (
-          <div
-            key={msg.id}
-            className="p-2 bg-blue-100 rounded w-fit max-w-[80%]"
-          >
-            {msg.text}
+        <div className="mt-4">
+          <h3 className="text-sm font-medium mb-1">Contact new</h3>
+          <div className="flex gap-2">
+            <input
+              value={newContactEmail}
+              onChange={(e) => setNewContactEmail(e.target.value)}
+              placeholder="email@example.com"
+              className="flex-1 border p-2 rounded"
+            />
+            <button
+              onClick={async () => {
+                const email = newContactEmail.trim();
+                if (!email) return;
+                // if we already have a conversation for this partner, select it
+                const existing = conversations.find((cv) => cv.partnerEmail === email);
+                try {
+                  if (existing) {
+                    const key = `conv:${[userEmail, email].sort().join(":")}`;
+                    try { localStorage.setItem(key, existing.id); } catch (e) {}
+                    setTargetEmail(email);
+                    setConversationId(existing.id);
+                    setMessages([]);
+                  } else {
+                    // call backend to create (or return) conversation; backend will ensure accounts exist
+                    const resp = await fetch(`${backend}/createConversation`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ email: userEmail, target_email: email }),
+                    });
+                    if (!resp.ok) {
+                      const err = await resp.json().catch(() => ({}));
+                      alert(err.error || "Failed to create conversation");
+                    } else {
+                      const d = await resp.json();
+                      const convId = d.conversation_id;
+                      if (convId) {
+                        const key = `conv:${[userEmail, email].sort().join(":")}`;
+                        try { localStorage.setItem(key, convId); } catch (e) {}
+                        setTargetEmail(email);
+                        setConversationId(convId);
+                        setMessages([]);
+                        // refresh conversations list to show the new conv
+                        setConversations((prev) => [...prev.filter((p) => p.partnerEmail), { id: convId, partnerEmail: email, raw: {} }]);
+                      }
+                    }
+                  }
+                } catch (e) {
+                  console.warn("Failed to create/select conversation", e);
+                  alert("Failed to start conversation: " + e);
+                } finally {
+                  setNewContactEmail("");
+                }
+              }}
+              className="bg-blue-500 text-white px-3 rounded"
+            >
+              Start
+            </button>
           </div>
-        ))}
-      </div>
+        </div>
+      </aside>
 
-      <form
-        onSubmit={sendMessage}
-        className="flex gap-2 w-full max-w-md items-center"
-      >
-        <input
-          type="text"
-          placeholder="Type your message..."
-          value={message}
-          onChange={(e: ChangeEvent<HTMLInputElement>) =>
-            setMessage(e.target.value)
-          }
-          className="flex-1 border p-2 rounded"
-        />
-        <button
-          type="submit"
-          className="bg-blue-500 text-white p-2 rounded cursor-pointer"
+      {/* Main chat area */}
+      <main className="flex-1 p-6 flex flex-col items-center gap-4">
+        <h1 className="text-2xl font-bold">
+          {displayEmail ? `Chat with ${displayEmail}` : "Linguagram"}
+        </h1>
+
+        <div className="flex flex-col gap-2 w-full max-w-2xl border p-4 rounded h-[60%] overflow-y-auto bg-gray-50">
+          {messages.map((msg) => (
+            <div
+              key={msg.id}
+              className="p-2 bg-blue-100 rounded w-fit max-w-[80%]"
+            >
+              {msg.text}
+            </div>
+          ))}
+        </div>
+
+        <form
+          onSubmit={sendMessage}
+          className="flex gap-2 w-full max-w-2xl items-center"
         >
-          Send
-        </button>
-      </form>
+          <input
+            type="text"
+            placeholder="Type your message..."
+            value={message}
+            onChange={(e: ChangeEvent<HTMLInputElement>) =>
+              setMessage(e.target.value)
+            }
+            className="flex-1 border p-2 rounded"
+          />
+          <button
+            type="submit"
+            className="bg-blue-500 text-white p-2 rounded cursor-pointer"
+          >
+            Send
+          </button>
+        </form>
+      </main>
     </div>
   );
 }
