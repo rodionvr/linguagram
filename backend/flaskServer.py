@@ -266,11 +266,101 @@ def get_conversations():
         convs_list = []
         for conv in convs_cursor:
             conv["_id"] = str(conv["_id"])
+            # Convert participant ObjectIds to strings so frontend can use them
+            if "participants" in conv:
+                conv["participants"] = [str(p) for p in conv["participants"]]
+            # Convert latest.sender_id and message_id if present
+            if "latest" in conv and conv["latest"]:
+                if "sender_id" in conv["latest"]:
+                    conv["latest"]["sender_id"] = str(conv["latest"]["sender_id"])
+                if "message_id" in conv["latest"] and conv["latest"]["message_id"]:
+                    conv["latest"]["message_id"] = str(conv["latest"]["message_id"])
             convs_list.append(conv)
     except Exception as e:
         return jsonify({"error": "Failed to retrieve conversations: " + str(e)}), 500
 
     return jsonify({"conversations": convs_list}), 200
+
+
+@app.route("/updateLanguage", methods=["POST"])
+def update_language():
+    """Update user's preferred language."""
+    data = request.get_json(silent=True) or {}
+    email = data.get("email")
+    language = data.get("language")
+
+    if not email or not language:
+        return jsonify({"error": "Missing 'email' or 'language' parameter"}), 400
+
+    accounts = _get_accounts_collection()
+    if accounts is None:
+        return jsonify({"error": "Database not configured"}), 500
+
+    try:
+        result = accounts.update_one(
+            {"email": email},
+            {"$set": {"language": language}}
+        )
+        if result.matched_count == 0:
+            return jsonify({"error": "User not found"}), 404
+        return jsonify({"success": True, "language": language}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to update language: {e}"}), 500
+
+
+@app.route("/createConversation", methods=["POST"])
+def create_conversation():
+    """Create (or return existing) a conversation between two emails.
+    Both accounts MUST already exist; returns error if target account not found.
+    Creates a conversation document with `created_at` and `latest.timestamp`
+    set to the conversation creation time.
+    Request JSON: {"email": caller_email, "target_email": partner_email}
+    """
+    data = request.get_json(silent=True) or {}
+    user_email = data.get("email")
+    target_email = data.get("target_email")
+
+    if not user_email or not target_email:
+        return jsonify({"error": "Missing 'email' or 'target_email' parameter"}), 400
+
+    accounts = _get_accounts_collection()
+    conversations = _get_conversations_collection()
+    if accounts is None or conversations is None:
+        return jsonify({"error": "Database not configured. Set MONGO_URI in environment or backend/.env"}), 500
+
+    # Check that both accounts exist; do NOT create them
+    try:
+        user = accounts.find_one({"email": user_email})
+        if not user:
+            return jsonify({"error": f"Your account ({user_email}) does not exist. Please sign in first."}), 404
+
+        target = accounts.find_one({"email": target_email})
+        if not target:
+            return jsonify({"error": f"User {target_email} does not have an account yet."}), 404
+    except Exception as e:
+        return jsonify({"error": "Failed to check accounts: " + str(e)}), 500
+
+    sender_id = user.get("_id")
+    target_id = target.get("_id")
+
+    # Find existing conversation
+    try:
+        conv = conversations.find_one({"participants": {"$all": [sender_id, target_id]}})
+        if conv:
+            return jsonify({"conversation_id": str(conv.get("_id")), "created": False}), 200
+
+        # Create conversation and set latest.timestamp to creation time
+        now = datetime.utcnow()
+        conv_doc = {
+            "participants": [sender_id, target_id],
+            "created_at": now,
+            "latest": {"timestamp": now, "language": "", "sender_id": str(sender_id), "message_id": None},
+            "updated_at": now,
+        }
+        res = conversations.insert_one(conv_doc)
+        return jsonify({"conversation_id": str(res.inserted_id), "created": True}), 201
+    except Exception as e:
+        return jsonify({"error": "Failed to create conversation: " + str(e)}), 500
 
 @app.route("/getMessages", methods = ["GET"])
 def get_messages():
