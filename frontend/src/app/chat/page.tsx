@@ -145,7 +145,17 @@ export default function ChatPage() {
       try {
         const { io } = await import("socket.io-client");
         if (!mounted) return;
-        const socket = io(backend, { transports: ["websocket"] });
+        const socket = io(backend, { 
+          transports: ["websocket", "polling"],
+          extraHeaders: {
+            "ngrok-skip-browser-warning": "true"
+          },
+          reconnectionDelay: 1000,
+          reconnection: true,
+          reconnectionAttempts: 10,
+          timeout: 20000,
+          forceNew: true
+        });
         socketRef.current = socket;
 
         socket.on("connect", () => {
