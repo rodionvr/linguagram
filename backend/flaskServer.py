@@ -350,7 +350,7 @@ def create_conversation():
             return jsonify({"conversation_id": str(conv.get("_id")), "created": False}), 200
 
         # Create conversation and set latest.timestamp to creation time
-        now = datetime.utcnow()
+        now = datetime.now()
         conv_doc = {
             "participants": [sender_id, target_id],
             "created_at": now,
@@ -450,23 +450,7 @@ def get_messages():
         })
 
     return jsonify({"messages": out}), 200
-# translate endpoint
-@app.route("/translate", methods = ["GET"])
-def translate():
-    new_message = request.args.get("new_message")   # variable to confirm
-    target_language = request.args.get("target_language") #variable to confirm
-    
-    if not new_message or not target_language:
-        return jsonify({"error": "Missing 'message' or 'language' parameter"}), 400
 
-
-    #  currently, function needs three args, but only have two rn
-    # leaving it as is for now
-    translated = translator.translate_with_context(new_message, target_language)
-    
-    return jsonify({
-       "translatedMessage": translated
-   })
 
 if __name__ == "__main__":
     # Use SocketIO runner so websocket handlers work
