@@ -22,6 +22,7 @@ export default function Profile() {
   const [userLanguage, setUserLanguage] = useState<string | null>(null);
   const [selectedLanguage, setSelectedLanguage] = useState<string>("");
   const [loading, setLoading] = useState(true);
+  const [isEditingLanguage, setIsEditingLanguage] = useState(false);
   const backend = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:5000";
 
   useEffect(() => {
@@ -62,6 +63,8 @@ export default function Profile() {
 
       if (res.ok) {
         setUserLanguage(selectedLanguage);
+        setIsEditingLanguage(false);
+        setSelectedLanguage("");
       } else {
         alert("Failed to update language");
       }
@@ -139,7 +142,56 @@ export default function Profile() {
   return (
     <div className="flex flex-col items-center justify-center h-screen gap-4">
       <h1 className="text-2xl font-bold">Welcome {user.name}</h1>
-      <p className="text-gray-600">Language: {userLanguage}</p>
+      
+      {isEditingLanguage ? (
+        <form onSubmit={handleLanguageSubmit} className="flex flex-col gap-3 items-center">
+          <select
+            value={selectedLanguage}
+            onChange={(e) => setSelectedLanguage(e.target.value)}
+            className="p-2 border rounded"
+            required
+          >
+            <option value="">Choose a language...</option>
+            {LANGUAGES.map((lang) => (
+              <option key={lang} value={lang}>
+                {lang}
+              </option>
+            ))}
+          </select>
+          <div className="flex gap-2">
+            <button
+              type="submit"
+              className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setIsEditingLanguage(false);
+                setSelectedLanguage("");
+              }}
+              className="px-4 py-2 bg-gray-300 rounded hover:bg-gray-400"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : (
+        <div className="flex items-center gap-2">
+          <p className="text-gray-600">Language: {userLanguage}</p>
+          <button
+            onClick={() => {
+              setSelectedLanguage(userLanguage || "");
+              setIsEditingLanguage(true);
+            }}
+            className="text-sm text-blue-500 hover:text-blue-700 underline"
+          >
+            Change
+          </button>
+        </div>
+      )}
+      
       <div className="flex gap-2 mt-4">
         <Link href="/chat">
           <button className="p-2 border-2 bg-blue-500 text-white rounded">

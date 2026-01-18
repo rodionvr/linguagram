@@ -146,20 +146,23 @@ export default function ChatPage() {
         socketRef.current = socket;
 
         socket.on("connect", () => {
-          console.debug("socket connected", socket.id);
+          console.log("Socket connected!", { socketId: socket.id, userEmail, conversationId });
           // register this client identity with server for direct deliveries
-          try {
+          if (userEmail) {
+            console.log("Emitting register with email:", userEmail);
             socket.emit("register", { email: userEmail });
-          } catch (e) {}
+          } else {
+            console.warn("Cannot register - userEmail not available yet");
+          }
           // if we already have a conversation, join its room so we receive events
-          if (conversationId) {
-            try {
-              socket.emit("join", { conversation_id: conversationId, email: userEmail });
-            } catch (e) {}
+          if (conversationId && userEmail) {
+            console.log("Emitting join for conversation:", conversationId);
+            socket.emit("join", { conversation_id: conversationId, email: userEmail });
           }
         });
 
         socket.on("message", (data: any) => {
+          console.log("Received message via socket:", data);
           // data: { message_id, conversation_id, sender_id, timestamp, original_text, translated_text }
           // if this client is the sender, show original_text; otherwise show translated_text when available
           const isSender = data.sender_email && data.sender_email === userEmailRef.current;
@@ -188,7 +191,15 @@ export default function ChatPage() {
         });
 
         socket.on("connect_error", (err: any) => {
-          console.warn("socket connect error", err);
+          console.error("Socket connect error:", err);
+        });
+
+        socket.on("error", (err: any) => {
+          console.error("Socket error:", err);
+        });
+
+        socket.on("disconnect", (reason: any) => {
+          console.warn("Socket disconnected:", reason);
         });
       } catch (e) {
         console.warn("Socket.IO client not available, falling back to REST", e);
@@ -202,6 +213,54 @@ export default function ChatPage() {
       } catch (e) {}
     };
   }, [backend]);
+
+  // Register socket with user email when it becomes available
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket || !userEmail) return;
+
+    // Register immediately if already connected
+    if (socket.connected) {
+      console.log("Registering socket with email (immediate):", userEmail);
+      socket.emit("register", { email: userEmail });
+    }
+
+    // Also register on future connections (e.g., reconnects)
+    const handleConnect = () => {
+      console.log("Socket connected, registering with email:", userEmail);
+      socket.emit("register", { email: userEmail });
+    };
+
+    socket.on("connect", handleConnect);
+
+    return () => {
+      socket.off("connect", handleConnect);
+    };
+  }, [userEmail]);
+
+  // Join conversation room when conversationId changes
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket || !conversationId || !userEmail) return;
+
+    // Join immediately if already connected
+    if (socket.connected) {
+      console.log("Joining conversation room (immediate):", conversationId);
+      socket.emit("join", { conversation_id: conversationId, email: userEmail });
+    }
+
+    // Also join on future connections (e.g., reconnects)
+    const handleConnect = () => {
+      console.log("Socket connected, joining conversation room:", conversationId);
+      socket.emit("join", { conversation_id: conversationId, email: userEmail });
+    };
+
+    socket.on("connect", handleConnect);
+
+    return () => {
+      socket.off("connect", handleConnect);
+    };
+  }, [conversationId, userEmail]);
 
   // Fetch user's conversations when authenticated/userEmail is known
   useEffect(() => {
