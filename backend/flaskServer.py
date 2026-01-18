@@ -215,8 +215,9 @@ def message():
             "language": recv_lang or "",
             "sender_id": sender_id,
             "message_id": msg_res.inserted_id,
+            "text": translated_text,  # Store the translated message text
         }
-        conversations.update_one({"_id": conv_id}, {"$set": {"latest": latest_info, "updated_at": datetime.utcnow()}})
+        conversations.update_one({"_id": conv_id}, {"$set": {"latest": latest_info, "updated_at": datetime.now()}})
     except Exception:
         # non-fatal: message already saved
         pass
@@ -284,6 +285,11 @@ def get_conversations():
                     conv["latest"]["sender_id"] = str(conv["latest"]["sender_id"])
                 if "message_id" in conv["latest"] and conv["latest"]["message_id"]:
                     conv["latest"]["message_id"] = str(conv["latest"]["message_id"])
+                # Convert timestamp to ISO string if it's a datetime object
+                if "timestamp" in conv["latest"] and conv["latest"]["timestamp"]:
+                    ts = conv["latest"]["timestamp"]
+                    if hasattr(ts, 'isoformat'):
+                        conv["latest"]["timestamp"] = ts.isoformat()
             convs_list.append(conv)
     except Exception as e:
         return jsonify({"error": "Failed to retrieve conversations: " + str(e)}), 500
@@ -370,6 +376,41 @@ def create_conversation():
         return jsonify({"conversation_id": str(res.inserted_id), "created": True}), 201
     except Exception as e:
         return jsonify({"error": "Failed to create conversation: " + str(e)}), 500
+
+@app.route("/deleteConversation", methods=["POST"])
+def delete_conversation():
+    """Delete a conversation and all its messages.
+    Request JSON: {"conversation_id": conversation_id}
+    """
+    data = request.get_json(silent=True) or {}
+    conv_id = data.get("conversation_id")
+
+    if not conv_id:
+        return jsonify({"error": "Missing 'conversation_id' parameter"}), 400
+
+    conversations = _get_conversations_collection()
+    messages = _get_messages_collection()
+    if conversations is None or messages is None:
+        return jsonify({"error": "Database not configured. Set MONGO_URI in environment or backend/.env"}), 500
+
+    try:
+        conv_obj_id = ObjectId(conv_id)
+    except Exception:
+        return jsonify({"error": "Invalid conversation_id"}), 400
+
+    try:
+        # Delete all messages in the conversation
+        messages.delete_many({"conversation_id": conv_obj_id})
+        
+        # Delete the conversation
+        result = conversations.delete_one({"_id": conv_obj_id})
+        
+        if result.deleted_count == 0:
+            return jsonify({"error": "Conversation not found"}), 404
+            
+        return jsonify({"success": True, "message": "Conversation deleted"}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to delete conversation: {e}"}), 500
 
 @app.route("/getMessages", methods = ["GET"])
 def get_messages():
@@ -613,8 +654,14 @@ def handle_send_message(data):
 
     # update conversation latest
     try:
-        latest_info = {"timestamp": msg_doc["timestamp"], "language": recv_lang or "", "sender_id": sender_id, "message_id": msg_res.inserted_id}
-        conversations.update_one({"_id": conv_obj_id}, {"$set": {"latest": latest_info, "updated_at": datetime.utcnow()}})
+        latest_info = {
+            "timestamp": msg_doc["timestamp"], 
+            "language": recv_lang or "", 
+            "sender_id": sender_id, 
+            "message_id": msg_res.inserted_id,
+            "text": translated_text,  # Store the translated message text
+        }
+        conversations.update_one({"_id": conv_obj_id}, {"$set": {"latest": latest_info, "updated_at": datetime.now()}})
     except Exception:
         pass
 
