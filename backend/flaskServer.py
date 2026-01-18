@@ -67,6 +67,14 @@ _mongo_client = None
 if _mongo_uri:
     try:
         _mongo_client = MongoClient(_mongo_uri)
+        # Create unique index for username
+        try:
+            db = _mongo_client[_mongo_db]
+            accounts_col = db["accounts"]
+            accounts_col.create_index("username", unique=True, sparse=True)
+        except Exception:
+            # Index may already exist, ignore
+            pass
     except Exception:
         _mongo_client = None
 
@@ -315,6 +323,112 @@ def update_language():
         return jsonify({"success": True, "language": language}), 200
     except Exception as e:
         return jsonify({"error": f"Failed to update language: {e}"}), 500
+
+
+@app.route("/checkUsername", methods=["POST"])
+def check_username():
+    """Check if username is available."""
+    data = request.get_json(silent=True) or {}
+    username = data.get("username")
+    
+    if not username:
+        return jsonify({"error": "Missing 'username' parameter"}), 400
+    
+    # Validate username format (alphanumeric and underscore, 3-20 chars)
+    import re
+    if not re.match(r"^[a-zA-Z0-9_]{3,20}$", username):
+        return jsonify({"error": "Username must be 3-20 characters, alphanumeric and underscore only"}), 400
+    
+    accounts = _get_accounts_collection()
+    if accounts is None:
+        return jsonify({"error": "Database not configured"}), 500
+    
+    try:
+        existing = accounts.find_one({"username": username.lower()})
+        if existing:
+            return jsonify({"available": False}), 200
+        return jsonify({"available": True}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to check username: {e}"}), 500
+
+
+@app.route("/setUsername", methods=["POST"])
+def set_username():
+    """Set username for authenticated user."""
+    data = request.get_json(silent=True) or {}
+    email = data.get("email")
+    username = data.get("username")
+    
+    if not email or not username:
+        return jsonify({"error": "Missing 'email' or 'username' parameter"}), 400
+    
+    # Validate username format
+    import re
+    if not re.match(r"^[a-zA-Z0-9_]{3,20}$", username):
+        return jsonify({"error": "Username must be 3-20 characters, alphanumeric and underscore only"}), 400
+    
+    accounts = _get_accounts_collection()
+    if accounts is None:
+        return jsonify({"error": "Database not configured"}), 500
+    
+    try:
+        # Check if username is already taken
+        existing_username = accounts.find_one({"username": username.lower()})
+        if existing_username:
+            # If it's the same user, allow update
+            if existing_username.get("email") != email:
+                return jsonify({"error": "Username already taken"}), 409
+        
+        # Update user's username
+        result = accounts.update_one(
+            {"email": email},
+            {"$set": {"username": username.lower()}}
+        )
+        if result.matched_count == 0:
+            return jsonify({"error": "User not found"}), 404
+        
+        return jsonify({"success": True, "username": username.lower()}), 200
+    except Exception as e:
+        # Check for duplicate key error
+        if "E11000" in str(e) or "duplicate" in str(e).lower():
+            return jsonify({"error": "Username already taken"}), 409
+        return jsonify({"error": f"Failed to set username: {e}"}), 500
+
+
+@app.route("/searchUser", methods=["GET"])
+def search_user():
+    """Search user by username or email."""
+    query = request.args.get("q")
+    if not query:
+        return jsonify({"error": "Missing 'q' parameter"}), 400
+    
+    accounts = _get_accounts_collection()
+    if accounts is None:
+        return jsonify({"error": "Database not configured"}), 500
+    
+    try:
+        # Search by username (case-insensitive) or email (case-insensitive)
+        # Match username starting with query or exact email
+        user = accounts.find_one({
+            "$or": [
+                {"username": {"$regex": f"^{query.lower()}", "$options": "i"}},
+                {"email": {"$regex": f"^{query}", "$options": "i"}}
+            ]
+        }, projection={"email": 1, "username": 1})
+        
+        if not user:
+            return jsonify({"found": False}), 200
+        
+        return jsonify({
+            "found": True,
+            "user": {
+                "email": user.get("email"),
+                "username": user.get("username"),
+                "id": str(user.get("_id"))
+            }
+        }), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to search user: {e}"}), 500
 
 
 @app.route("/createConversation", methods=["POST"])
@@ -570,11 +684,11 @@ def handle_send_message(data):
     try:
         if conv_obj_id:
             conv = conversations.find_one({"_id": conv_obj_id})
-            if not conv:
+            if conv is None:
                 conv_obj_id = None
-        if not conv_obj_id:
+        if conv_obj_id is None:
             conv = conversations.find_one({"participants": {"$all": [sender_id, target_id]}})
-            if not conv:
+            if conv is None:
                 conv_doc = {"participants": [sender_id, target_id], "created_at": datetime.utcnow(), "latest": None}
                 conv_res = conversations.insert_one(conv_doc)
                 conv_obj_id = conv_res.inserted_id

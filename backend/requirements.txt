@@ -6,4 +6,5 @@ flask-cors
 python-dotenv
 flask-socketio
 flask-login
-....
+eventlet
+upstash-redis

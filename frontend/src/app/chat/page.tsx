@@ -7,6 +7,21 @@ interface Message {
   id: string;
   text: string;
   sender_id?: string;
+  timestamp?: string;
+  
+}
+
+interface Conversation {
+  id: string;
+  partnerEmail: string;
+  partnerId?: string;
+  latestMessage?: {
+    text: string;
+    timestamp: string;
+    sender_id: string;
+  };
+  updated_at?: string;
+  raw: any;
 }
 
 export default function ChatPage() {
@@ -19,14 +34,23 @@ export default function ChatPage() {
   const socketRef = useRef<any>(null);
   const userEmailRef = useRef<string>("");
   const [conversationId, setConversationId] = useState<string | null>(null);
-  const [conversations, setConversations] = useState<Array<any>>([]);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
   const [newContactEmail, setNewContactEmail] = useState<string>("");
   const [loadingConvs, setLoadingConvs] = useState<boolean>(false);
-
-  const convStorageKey = `conv:${[userEmail, targetEmail].sort().join(":")}`;
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   const router = useRouter();
   const [authChecked, setAuthChecked] = useState(false);
+
+  // Auto-scroll to bottom when messages change or load
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
 
   // require signed-in user; redirect to /profile if not signed in
   useEffect(() => {
@@ -52,12 +76,8 @@ export default function ChatPage() {
           });
           if (userRes.ok) {
             const userData = await userRes.json();
-            console.log("User data from backend:", userData);
             if (userData.user?._id) {
-              console.log("Setting userId to:", userData.user._id);
               setUserId(userData.user._id);
-            } else {
-              console.warn("No _id found in user data");
             }
           }
         } catch (e) {
@@ -69,15 +89,32 @@ export default function ChatPage() {
         setAuthChecked(true);
       }
     })();
-  }, [router]);
+  }, [router, backend]);
 
-  
+  // Fetch message preview text by message_id
+  const fetchMessagePreview = async (messageId: string, convId: string): Promise<string> => {
+    if (!messageId || !userEmail) return "";
+    try {
+      const res = await fetch(
+        `${backend}/getMessages?email=${encodeURIComponent(userEmail)}&conversation_id=${encodeURIComponent(convId)}`,
+        { headers: { 'ngrok-skip-browser-warning': 'true' } }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const msg = data.messages?.find((m: any) => m.message_id === messageId);
+        return msg?.text || "";
+      }
+    } catch (e) {
+      // Silent fail for preview
+    }
+    return "";
+  };
 
-  // Отправка сообщения
+  // Send message
   const sendMessage = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
 
-    if (!message) return;
+    if (!message || !targetEmail) return;
 
     interface MessageResponse {
       message?: string;
@@ -86,12 +123,9 @@ export default function ChatPage() {
       error?: string;
     }
 
-    console.log("Sending message:", { message, userEmail, targetEmail, conversationId, socketConnected: socketRef.current?.connected });
-
     // Prefer websocket if connected
     try {
       if (socketRef.current && socketRef.current.connected) {
-        console.log("Sending via websocket");
         socketRef.current.emit("send_message", {
           message,
           email: userEmail,
@@ -101,8 +135,6 @@ export default function ChatPage() {
         setMessage("");
         return;
       }
-
-      console.log("Sending via REST");
 
       // Fallback to REST if socket unavailable
       const res = await fetch(`${backend}/message`, {
@@ -126,18 +158,21 @@ export default function ChatPage() {
       }
 
       if (res.ok && data.message_id) {
-        setConversationId(data.conversation_id || conversationId);
-        // persist conversation id so refresh keeps it
-        if (data.conversation_id) localStorage.setItem(convStorageKey, data.conversation_id);
-        // append only if socket not connected (no real-time delivery)
+        const newConvId = data.conversation_id || conversationId;
+        setConversationId(newConvId);
+        if (newConvId && data.conversation_id) {
+          const key = `conv:${[userEmail, targetEmail].sort().join(":")}`;
+          localStorage.setItem(key, newConvId);
+        }
+        // Append only if socket not connected (no real-time delivery)
         if (!socketRef.current || !socketRef.current.connected) {
-          const newMsg = { text: message, id: data.message_id };
+          const newMsg = { text: message, id: data.message_id, sender_id: userId };
           setMessages((prev) => {
             if (prev.find((m) => m.id === newMsg.id)) return prev;
             return [...prev, newMsg];
           });
         }
-        setMessage(""); // очистка поля
+        setMessage("");
       } else {
         console.error("Message failed:", data);
         alert(data.error || "Error sending message");
@@ -151,16 +186,6 @@ export default function ChatPage() {
   // Setup Socket.IO client
   useEffect(() => {
     let mounted = true;
-    // Don't try to load from localStorage until we know both emails (otherwise key is malformed)
-    if (userEmail && targetEmail) {
-      const key = `conv:${[userEmail, targetEmail].sort().join(":")}`;
-      const stored = localStorage.getItem(key);
-      console.log("Socket effect - loading from localStorage:", { key, stored, currentConversationId: conversationId });
-      if (stored && !conversationId) {
-        console.log("Setting conversationId from localStorage:", stored);
-        setConversationId(stored);
-      }
-    }
     (async () => {
       try {
         const { io } = await import("socket.io-client");
@@ -179,38 +204,58 @@ export default function ChatPage() {
         socketRef.current = socket;
 
         socket.on("connect", () => {
-          console.log("Socket connected!", { socketId: socket.id, userEmail, conversationId });
-          // register this client identity with server for direct deliveries
+          // Register this client identity with server
           if (userEmail) {
-            console.log("Emitting register with email:", userEmail);
             socket.emit("register", { email: userEmail });
-          } else {
-            console.warn("Cannot register - userEmail not available yet");
           }
-          // if we already have a conversation, join its room so we receive events
+          // Join conversation room if available
           if (conversationId && userEmail) {
-            console.log("Emitting join for conversation:", conversationId);
             socket.emit("join", { conversation_id: conversationId, email: userEmail });
           }
         });
 
         socket.on("message", (data: any) => {
-          console.log("Received message via socket:", data);
-          // data: { message_id, conversation_id, sender_id, timestamp, original_text, translated_text }
-          // if this client is the sender, show original_text; otherwise show translated_text when available
           const isSender = data.sender_email && data.sender_email === userEmailRef.current;
-          const text = isSender ? (data.original_text || data.text || data.translated_text || "") : (data.translated_text || data.original_text || data.text || "");
+          const text = isSender 
+            ? (data.original_text || data.text || data.translated_text || "") 
+            : (data.translated_text || data.original_text || data.text || "");
           const id = data.message_id || String(Date.now());
-          const newMsg = { id, text, sender_id: data.sender_id };
+          const newMsg = { id, text, sender_id: data.sender_id, timestamp: data.timestamp };
+          
           setMessages((prev) => {
             if (prev.find((m) => m.id === newMsg.id)) return prev;
             return [...prev, newMsg];
           });
+
+          // Update conversation list with new message preview
+          if (data.conversation_id) {
+            setConversations((prev) => {
+              return prev.map((conv) => {
+                if (conv.id === data.conversation_id) {
+                  return {
+                    ...conv,
+                    latestMessage: {
+                      text: text.length > 50 ? text.substring(0, 50) + "..." : text,
+                      timestamp: data.timestamp,
+                      sender_id: data.sender_id,
+                    },
+                    updated_at: data.timestamp,
+                  };
+                }
+                return conv;
+              }).sort((a, b) => {
+                const timeA = a.updated_at || a.latestMessage?.timestamp || "";
+                const timeB = b.updated_at || b.latestMessage?.timestamp || "";
+                return timeB.localeCompare(timeA);
+              });
+            });
+          }
+
           if (!conversationId && data.conversation_id) {
             setConversationId(data.conversation_id);
-            // persist and join the room for subsequent messages
+            const key = `conv:${[userEmail, targetEmail].sort().join(":")}`;
             try {
-              localStorage.setItem(convStorageKey, data.conversation_id);
+              localStorage.setItem(key, data.conversation_id);
             } catch (e) {}
             try {
               socket.emit("join", { conversation_id: data.conversation_id, email: userEmail });
@@ -219,8 +264,9 @@ export default function ChatPage() {
         });
 
         socket.on("joined", (d: any) => {
-          // server confirmed join; capture conversation id if provided
-          if (d && d.conversation_id && !conversationId) setConversationId(d.conversation_id);
+          if (d && d.conversation_id && !conversationId) {
+            setConversationId(d.conversation_id);
+          }
         });
 
         socket.on("connect_error", (err: any) => {
@@ -252,18 +298,13 @@ export default function ChatPage() {
     const socket = socketRef.current;
     if (!socket || !userEmail) return;
 
-    // Register immediately if already connected
-    if (socket.connected) {
-      console.log("Registering socket with email (immediate):", userEmail);
-      socket.emit("register", { email: userEmail });
-    }
-
-    // Also register on future connections (e.g., reconnects)
     const handleConnect = () => {
-      console.log("Socket connected, registering with email:", userEmail);
       socket.emit("register", { email: userEmail });
     };
 
+    if (socket.connected) {
+      handleConnect();
+    }
     socket.on("connect", handleConnect);
 
     return () => {
@@ -276,18 +317,13 @@ export default function ChatPage() {
     const socket = socketRef.current;
     if (!socket || !conversationId || !userEmail) return;
 
-    // Join immediately if already connected
-    if (socket.connected) {
-      console.log("Joining conversation room (immediate):", conversationId);
-      socket.emit("join", { conversation_id: conversationId, email: userEmail });
-    }
-
-    // Also join on future connections (e.g., reconnects)
     const handleConnect = () => {
-      console.log("Socket connected, joining conversation room:", conversationId);
       socket.emit("join", { conversation_id: conversationId, email: userEmail });
     };
 
+    if (socket.connected) {
+      handleConnect();
+    }
     socket.on("connect", handleConnect);
 
     return () => {
@@ -299,6 +335,7 @@ export default function ChatPage() {
   useEffect(() => {
     if (!authChecked || !userEmail) return;
     let mounted = true;
+    
     const fetchEmail = async (id: string) => {
       try {
         const res = await fetch(`${backend}/getEmail?id=${encodeURIComponent(id)}`, {
@@ -326,32 +363,68 @@ export default function ChatPage() {
         const data = await res.json();
         const convs = data.conversations || [];
 
-        // For each conversation, resolve partner email(s)
-        const enriched = [] as any[];
+        // Enrich conversations with partner email and latest message preview
+        const enriched: Conversation[] = [];
         for (const c of convs) {
           try {
             const participants = c.participants || [];
-            // call getEmail for each participant id to resolve email
-            const emails: Array<string> = [];
+            const emails: string[] = [];
+            const participantIds: string[] = [];
+            
             for (const p of participants) {
               const idStr = typeof p === "string" ? p : (p && p.$oid) ? p.$oid : String(p);
               const email = await fetchEmail(idStr);
               if (email) emails.push(email);
+              participantIds.push(idStr);
             }
-            // Determine partner email (one that isn't the current user)
+            
             const partnerEmail = emails.find((em) => em && em !== userEmail) || emails[0] || "";
-            enriched.push({ id: c._id || c.id || String(c["_id"]), partnerEmail, raw: c });
+            const partnerId = participantIds.find((id) => {
+              // We'd need to match by email, but for now just use first non-user ID
+              return true;
+            });
+            
+            const convId = c._id || c.id || String(c["_id"]);
+            let latestMessage;
+            
+            // Try to get preview from latest message if available
+            if (c.latest?.message_id) {
+              const previewText = await fetchMessagePreview(c.latest.message_id, convId);
+              if (previewText) {
+                latestMessage = {
+                  text: previewText.length > 50 ? previewText.substring(0, 50) + "..." : previewText,
+                  timestamp: c.latest.timestamp || c.updated_at || "",
+                  sender_id: c.latest.sender_id || "",
+                };
+              }
+            }
+            
+            enriched.push({
+              id: convId,
+              partnerEmail,
+              partnerId: participantIds.find((id) => id !== userId) || partnerId,
+              latestMessage,
+              updated_at: c.updated_at || c.latest?.timestamp || "",
+              raw: c,
+            });
           } catch (e) {
-            // skip problematic conv
+            console.warn("Error enriching conversation:", e);
           }
         }
 
+        // Sort by updated_at descending
+        enriched.sort((a, b) => {
+          const timeA = a.updated_at || "";
+          const timeB = b.updated_at || "";
+          return timeB.localeCompare(timeA);
+        });
+
         if (!mounted) return;
         setConversations(enriched);
+        
         // Auto-select the most recent conversation if available
         if (enriched.length > 0 && !conversationId) {
           const mostRecent = enriched[0];
-          console.log("Auto-selecting conversation:", { id: mostRecent.id, partnerEmail: mostRecent.partnerEmail });
           setTargetEmail(mostRecent.partnerEmail);
           setConversationId(mostRecent.id);
         }
@@ -366,33 +439,29 @@ export default function ChatPage() {
     return () => {
       mounted = false;
     };
-  }, [authChecked, userEmail, backend]);
+  }, [authChecked, userEmail, backend, userId]);
 
-  // When conversationId is obtained (e.g., REST created it), join the room
+  // Load messages when conversation changes
   useEffect(() => {
-    console.log("Message loading effect triggered:", { conversationId, userEmail, targetEmail, allPresent: !!(conversationId && userEmail && targetEmail) });
     if (!conversationId || !userEmail || !targetEmail) {
-      console.log("Skipping message load - missing required values");
       return;
     }
-    // persist using canonical key
-    const key = `conv:${[userEmail, targetEmail].sort().join(":")}`;;
+    
+    const key = `conv:${[userEmail, targetEmail].sort().join(":")}`;
     try {
       localStorage.setItem(key, conversationId);
     } catch (e) {}
-    // fetch existing messages for this conversation
+    
+    // Fetch existing messages for this conversation
     (async () => {
       try {
-        console.log("Fetching messages for conversation:", conversationId);
         const res = await fetch(
           `${backend}/getMessages?email=${encodeURIComponent(userEmail)}&conversation_id=${encodeURIComponent(conversationId)}`,
           { headers: { 'ngrok-skip-browser-warning': 'true' } }
         );
         if (res.ok) {
           const data = await res.json();
-          console.log("Loaded messages:", data);
           if (data && data.messages) {
-            // dedupe by id and preserve sender_id
             const map = new Map<string, { text: string; sender_id: string }>();
             for (const m of data.messages) {
               map.set(m.message_id, { text: m.text, sender_id: m.sender_id });
@@ -408,6 +477,8 @@ export default function ChatPage() {
         console.warn("Failed to load messages", e);
       }
     })();
+    
+    // Join conversation room
     try {
       const s = socketRef.current;
       if (s && s.connected) {
@@ -420,66 +491,112 @@ export default function ChatPage() {
 
   if (!authChecked) return null;
 
-  // Derive display email from conversation if targetEmail not yet set
   const currentConv = conversationId ? conversations.find(c => c.id === conversationId) : null;
   const displayEmail = targetEmail || currentConv?.partnerEmail || "";
 
+  const formatTime = (timestamp?: string) => {
+    if (!timestamp) return "";
+    try {
+      const date = new Date(timestamp);
+      const now = new Date();
+      const diffMs = now.getTime() - date.getTime();
+      const diffMins = Math.floor(diffMs / 60000);
+      const diffHours = Math.floor(diffMs / 3600000);
+      const diffDays = Math.floor(diffMs / 86400000);
+
+      if (diffMins < 1) return "Just now";
+      if (diffMins < 60) return `${diffMins}m`;
+      if (diffHours < 24) return `${diffHours}h`;
+      if (diffDays < 7) return `${diffDays}d`;
+      return date.toLocaleDateString();
+    } catch {
+      return "";
+    }
+  };
+
   return (
-    <div className="flex h-screen">
-      {/* Sidebar */}
-      <aside className="w-80 border-r p-4 bg-white">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-medium">Conversations</h2>
+    <div className="flex h-screen w-screen overflow-hidden">
+      {/* Sidebar - 30% width */}
+      <aside className="w-[30%] border-r bg-gray-50 flex flex-col overflow-hidden">
+        <div className="p-4 border-b bg-white flex items-center justify-between">
+          <h2 className="text-lg font-semibold">Chats</h2>
           <Link href="/profile">
-            <button className="text-sm text-blue-500 hover:text-blue-700">
+            <button className="text-sm text-blue-500 hover:text-blue-700 px-2 py-1">
               Profile
             </button>
           </Link>
         </div>
-        <div className="flex flex-col gap-2 mb-4">
+        
+        {/* Conversations list */}
+        <div className="flex-1 overflow-y-auto">
           {loadingConvs ? (
-            <div className="text-sm text-gray-500">Loading...</div>
+            <div className="p-4 text-sm text-gray-500">Loading...</div>
           ) : conversations.length === 0 ? (
-            <div className="text-sm text-gray-500">No conversations yet</div>
+            <div className="p-4 text-sm text-gray-500">No conversations yet</div>
           ) : (
             conversations.map((c) => (
               <button
                 key={c.id}
                 onClick={() => {
-                    const partner = c.partnerEmail || "";                  // Skip if already selected to avoid clearing messages
-                  if (c.id === conversationId && partner === targetEmail) {
+                  if (c.id === conversationId && c.partnerEmail === targetEmail) {
                     return;
-                  }                  setTargetEmail(partner);
-                  // persist using canonical key
-                  const key = `conv:${[userEmail, partner].sort().join(":")}`;
+                  }
+                  setTargetEmail(c.partnerEmail);
+                  const key = `conv:${[userEmail, c.partnerEmail].sort().join(":")}`;
                   try {
                     localStorage.setItem(key, c.id);
                   } catch (e) {}
                   setConversationId(c.id);
                   setMessages([]);
                 }}
-                className="text-left p-2 rounded hover:bg-gray-100"
+                className={`w-full text-left p-3 hover:bg-gray-100 border-b transition-colors ${
+                  c.id === conversationId ? "bg-blue-50 border-blue-200" : "bg-white"
+                }`}
               >
-                {c.partnerEmail || "(unknown)"}
+                <div className="flex items-start justify-between">
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium text-gray-900 truncate">
+                      {c.partnerEmail || "(unknown)"}
+                    </div>
+                    {c.latestMessage && (
+                      <div className="text-sm text-gray-600 truncate mt-1">
+                        {c.latestMessage.sender_id === userId ? "You: " : ""}
+                        {c.latestMessage.text}
+                      </div>
+                    )}
+                  </div>
+                  {c.latestMessage && (
+                    <div className="text-xs text-gray-500 ml-2 flex-shrink-0">
+                      {formatTime(c.latestMessage.timestamp || c.updated_at)}
+                    </div>
+                  )}
+                </div>
               </button>
             ))
           )}
         </div>
 
-        <div className="mt-4">
-          <h3 className="text-sm font-medium mb-1">Contact new</h3>
+        {/* New contact input */}
+        <div className="p-4 border-t bg-white">
           <div className="flex gap-2">
             <input
               value={newContactEmail}
               onChange={(e) => setNewContactEmail(e.target.value)}
-              placeholder="email@example.com"
-              className="flex-1 border p-2 rounded"
+              onKeyPress={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  const btn = document.querySelector('[data-start-conversation]') as HTMLButtonElement;
+                  btn?.click();
+                }
+              }}
+              placeholder="Email address"
+              className="flex-1 border border-gray-300 p-2 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
             <button
+              data-start-conversation
               onClick={async () => {
                 const email = newContactEmail.trim();
                 if (!email) return;
-                // if we already have a conversation for this partner, select it
                 const existing = conversations.find((cv) => cv.partnerEmail === email);
                 try {
                   if (existing) {
@@ -489,7 +606,6 @@ export default function ChatPage() {
                     setConversationId(existing.id);
                     setMessages([]);
                   } else {
-                    // call backend to create (or return) conversation; backend will ensure accounts exist
                     const resp = await fetch(`${backend}/createConversation`, {
                       method: "POST",
                       headers: { 
@@ -510,8 +626,8 @@ export default function ChatPage() {
                         setTargetEmail(email);
                         setConversationId(convId);
                         setMessages([]);
-                        // refresh conversations list to show the new conv
-                        setConversations((prev) => [...prev.filter((p) => p.partnerEmail), { id: convId, partnerEmail: email, raw: {} }]);
+                        // Refresh conversations list
+                        window.location.reload(); // Simple refresh for now
                       }
                     }
                   }
@@ -522,7 +638,7 @@ export default function ChatPage() {
                   setNewContactEmail("");
                 }
               }}
-              className="bg-blue-500 text-white px-3 rounded"
+              className="bg-blue-500 text-white px-4 py-2 rounded text-sm hover:bg-blue-600 transition-colors"
             >
               Start
             </button>
@@ -530,53 +646,78 @@ export default function ChatPage() {
         </div>
       </aside>
 
-      {/* Main chat area */}
-      <main className="flex-1 p-6 flex flex-col items-center gap-4">
-        <h1 className="text-2xl font-bold">
-          {displayEmail ? `Chat with ${displayEmail}` : "Linguagram"}
-        </h1>
+      {/* Main chat area - 70% width, full height */}
+      <main className="flex-1 flex flex-col h-screen overflow-hidden bg-white">
+        {/* Chat header */}
+        <div className="p-4 border-b bg-gray-50">
+          <h1 className="text-xl font-semibold text-gray-800">
+            {displayEmail ? displayEmail : "Select a conversation"}
+          </h1>
+        </div>
 
-        <div className="flex flex-col gap-2 w-full max-w-2xl border p-4 rounded h-[60%] overflow-y-auto bg-gray-50">
-          {messages.map((msg) => {
-            const isFromMe = msg.sender_id === userId;
-            console.log("Message alignment:", { msgSenderId: msg.sender_id, userId, isFromMe });
-            return (
-              <div
+        {/* Messages container - scrollable */}
+        <div 
+          ref={messagesContainerRef}
+          className="flex-1 overflow-y-auto p-4 bg-gray-100"
+          style={{ scrollBehavior: "smooth" }}
+        >
+          <div className="flex flex-col gap-3 max-w-4xl mx-auto">
+            {messages.map((msg) => {
+              const isFromMe = msg.sender_id === userId;
+              return (
+                <div
                 key={msg.id}
                 className={`flex ${isFromMe ? 'justify-end' : 'justify-start'}`}
               >
                 <div
-                  className={`p-2 rounded w-fit max-w-[80%] ${
-                    isFromMe ? 'bg-blue-500 text-white' : 'bg-gray-200 text-black'
+                  className={`px-4 py-2 rounded-lg max-w-[70%] break-words ${
+                    isFromMe 
+                      ? 'bg-blue-500 text-white rounded-br-none' 
+                      : 'bg-white text-gray-800 rounded-bl-none border border-gray-200'
                   }`}
                 >
                   {msg.text}
+              
+                  {isFromMe && (
+                    <div className="text-xs text-right opacity-70 mt-1">
+                      {msg.status === "sending" && "⏳"}
+                      {msg.status === "sent" && "✓"}
+                      {msg.status === "read" && "✓✓"}
+                    </div>
+                  )}
                 </div>
               </div>
-            );
-          })}
+              );
+            })}
+            <div ref={messagesEndRef} />
+          </div>
         </div>
 
-        <form
-          onSubmit={sendMessage}
-          className="flex gap-2 w-full max-w-2xl items-center"
-        >
-          <input
-            type="text"
-            placeholder="Type your message..."
-            value={message}
-            onChange={(e: ChangeEvent<HTMLInputElement>) =>
-              setMessage(e.target.value)
-            }
-            className="flex-1 border p-2 rounded"
-          />
-          <button
-            type="submit"
-            className="bg-blue-500 text-white p-2 rounded cursor-pointer"
+        {/* Input area */}
+        {displayEmail && (
+          <form
+            onSubmit={sendMessage}
+            className="p-4 border-t bg-white"
           >
-            Send
-          </button>
-        </form>
+            <div className="flex gap-2 max-w-4xl mx-auto">
+              <input
+                type="text"
+                placeholder="Type a message..."
+                value={message}
+                onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                  setMessage(e.target.value)
+                }
+                className="flex-1 border border-gray-300 p-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <button
+                type="submit"
+                className="bg-blue-500 text-white px-6 py-3 rounded-lg hover:bg-blue-600 transition-colors font-medium"
+              >
+                Send
+              </button>
+            </div>
+          </form>
+        )}
       </main>
     </div>
   );

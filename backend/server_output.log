@@ -1,0 +1,20 @@
+C:\Users\rodio\Desktop\projects\linguagram\backend\flaskServer.py:24: DeprecationWarning: 
+Eventlet is deprecated. It is currently being maintained in bugfix mode, and
+we strongly recommend against using it for new projects.
+
+If you are already using Eventlet, we recommend migrating to a different
+framework.  For more detail see
+https://eventlet.readthedocs.io/en/latest/asyncio/migration.html
+
+  import eventlet  # type: ignore
+Server initialized for threading.
+Warning: Redis connection failed: Connection closed by server.. Caching will be disabled.
+Starting Linguagram server...
+Async Mode: Threading (stable)
+Redis caching: Disabled
+MongoDB: Connected
+Translator: Available
+Using Flask-SocketIO server...
+ * Serving Flask app 'flaskServer'
+ * Debug mode: on
+An attempt was made to access a socket in a way forbidden by its access permissions
