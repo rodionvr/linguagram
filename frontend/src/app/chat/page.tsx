@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect, useRef, FormEvent, ChangeEvent } from "react";
+import { useRouter } from "next/navigation";
 
 interface Message {
   id: string;
@@ -15,12 +16,40 @@ export default function ChatPage() {
   const [userEmail, setUserEmail] = useState<string>(
     "patillumaniti@gmail.com",
   ); // твой email
-
   const backend = process.env.BACKEND_URL || "http://localhost:5000"; // адрес Flask
   const socketRef = useRef<any>(null);
   const [conversationId, setConversationId] = useState<string | null>(null);
 
   const convStorageKey = `conv:${[userEmail, targetEmail].sort().join(":")}`;
+
+  const router = useRouter();
+  const [authChecked, setAuthChecked] = useState(false);
+
+  // require signed-in user; redirect to /profile if not signed in
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/session");
+        if (!res.ok) {
+          router.push("/profile");
+          return;
+        }
+        const data = await res.json();
+        const email = data?.user?.email;
+        if (!email) {
+          router.push("/profile");
+          return;
+        }
+        setUserEmail(email);
+      } catch (e) {
+        router.push("/profile");
+      } finally {
+        setAuthChecked(true);
+      }
+    })();
+  }, [router]);
+
+  
 
   // Отправка сообщения
   const sendMessage = async (e: FormEvent<HTMLFormElement>) => {
@@ -197,6 +226,8 @@ export default function ChatPage() {
       // ignore
     }
   }, [conversationId, userEmail]);
+
+  if (!authChecked) return null;
 
   return (
     <div className="flex flex-col items-center justify-start h-screen p-4 gap-4">
