@@ -13,7 +13,7 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [targetEmail, setTargetEmail] = useState<string>("");
   const [userEmail, setUserEmail] = useState<string>("");
-  const backend = process.env.BACKEND_URL || "http://localhost:5000"; // адрес Flask
+  const backend = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:5000";
   const socketRef = useRef<any>(null);
   const userEmailRef = useRef<string>("");
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -87,7 +87,10 @@ export default function ChatPage() {
       // Fallback to REST if socket unavailable
       const res = await fetch(`${backend}/message`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "ngrok-skip-browser-warning": "true"
+        },
         body: JSON.stringify({
           message,
           email: userEmail,
@@ -268,7 +271,9 @@ export default function ChatPage() {
     let mounted = true;
     const fetchEmail = async (id: string) => {
       try {
-        const res = await fetch(`${backend}/getEmail?id=${encodeURIComponent(id)}`);
+        const res = await fetch(`${backend}/getEmail?id=${encodeURIComponent(id)}`, {
+          headers: { 'ngrok-skip-browser-warning': 'true' }
+        });
         if (!res.ok) return null;
         const d = await res.json();
         return d.email || null;
@@ -280,7 +285,9 @@ export default function ChatPage() {
     (async () => {
       setLoadingConvs(true);
       try {
-        const res = await fetch(`${backend}/getConvs?email=${encodeURIComponent(userEmail)}`);
+        const res = await fetch(`${backend}/getConvs?email=${encodeURIComponent(userEmail)}`, {
+          headers: { 'ngrok-skip-browser-warning': 'true' }
+        });
         if (!res.ok) {
           setConversations([]);
           setLoadingConvs(false);
@@ -348,7 +355,8 @@ export default function ChatPage() {
       try {
         console.log("Fetching messages for conversation:", conversationId);
         const res = await fetch(
-          `${backend}/getMessages?email=${encodeURIComponent(userEmail)}&conversation_id=${encodeURIComponent(conversationId)}`
+          `${backend}/getMessages?email=${encodeURIComponent(userEmail)}&conversation_id=${encodeURIComponent(conversationId)}`,
+          { headers: { 'ngrok-skip-browser-warning': 'true' } }
         );
         if (res.ok) {
           const data = await res.json();
@@ -448,7 +456,10 @@ export default function ChatPage() {
                     // call backend to create (or return) conversation; backend will ensure accounts exist
                     const resp = await fetch(`${backend}/createConversation`, {
                       method: "POST",
-                      headers: { "Content-Type": "application/json" },
+                      headers: { 
+                        "Content-Type": "application/json",
+                        "ngrok-skip-browser-warning": "true"
+                      },
                       body: JSON.stringify({ email: userEmail, target_email: email }),
                     });
                     if (!resp.ok) {

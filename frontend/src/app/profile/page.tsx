@@ -35,7 +35,11 @@ export default function Profile() {
           
           if (data?.user?.email) {
             // Fetch user data from backend to check language
-            const userRes = await fetch(`${backend}/login?email=${encodeURIComponent(data.user.email)}`);
+            const userRes = await fetch(`${backend}/login?email=${encodeURIComponent(data.user.email)}`, {
+              headers: {
+                'ngrok-skip-browser-warning': 'true'
+              }
+            });
             if (userRes.ok) {
               const userData = await userRes.json();
               setUserLanguage(userData.user?.language || "");
@@ -57,7 +61,10 @@ export default function Profile() {
     try {
       const res = await fetch(`${backend}/updateLanguage`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "ngrok-skip-browser-warning": "true"
+        },
         body: JSON.stringify({ email: session.user.email, language: selectedLanguage }),
       });
 

@@ -15,7 +15,15 @@ app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "placeholder")
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # Socket.IO for realtime chat
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode='threading',
+    logger=True,
+    engineio_logger=True,
+    ping_timeout=60,
+    ping_interval=25
+)
 
 # map email -> set of socket session ids
 connected_users = {}
