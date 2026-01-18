@@ -66,9 +66,12 @@ export default function ChatPage() {
       error?: string;
     }
 
+    console.log("Sending message:", { message, userEmail, targetEmail, conversationId, socketConnected: socketRef.current?.connected });
+
     // Prefer websocket if connected
     try {
       if (socketRef.current && socketRef.current.connected) {
+        console.log("Sending via websocket");
         socketRef.current.emit("send_message", {
           message,
           email: userEmail,
@@ -78,6 +81,8 @@ export default function ChatPage() {
         setMessage("");
         return;
       }
+
+      console.log("Sending via REST");
 
       // Fallback to REST if socket unavailable
       const res = await fetch(`${backend}/message`, {
@@ -123,10 +128,15 @@ export default function ChatPage() {
   // Setup Socket.IO client
   useEffect(() => {
     let mounted = true;
-    // load stored conversation id and messages
-    const stored = localStorage.getItem(convStorageKey);
-    if (stored && !conversationId) {
-      setConversationId(stored);
+    // Don't try to load from localStorage until we know both emails (otherwise key is malformed)
+    if (userEmail && targetEmail) {
+      const key = `conv:${[userEmail, targetEmail].sort().join(":")}`;
+      const stored = localStorage.getItem(key);
+      console.log("Socket effect - loading from localStorage:", { key, stored, currentConversationId: conversationId });
+      if (stored && !conversationId) {
+        console.log("Setting conversationId from localStorage:", stored);
+        setConversationId(stored);
+      }
     }
     (async () => {
       try {
@@ -245,6 +255,7 @@ export default function ChatPage() {
         // Auto-select the most recent conversation if available
         if (enriched.length > 0 && !conversationId) {
           const mostRecent = enriched[0];
+          console.log("Auto-selecting conversation:", { id: mostRecent.id, partnerEmail: mostRecent.partnerEmail });
           setTargetEmail(mostRecent.partnerEmail);
           setConversationId(mostRecent.id);
         }
@@ -263,19 +274,26 @@ export default function ChatPage() {
 
   // When conversationId is obtained (e.g., REST created it), join the room
   useEffect(() => {
-    if (!conversationId) return;
-    // persist
+    console.log("Message loading effect triggered:", { conversationId, userEmail, targetEmail, allPresent: !!(conversationId && userEmail && targetEmail) });
+    if (!conversationId || !userEmail || !targetEmail) {
+      console.log("Skipping message load - missing required values");
+      return;
+    }
+    // persist using canonical key
+    const key = `conv:${[userEmail, targetEmail].sort().join(":")}`;;
     try {
-      localStorage.setItem(convStorageKey, conversationId);
+      localStorage.setItem(key, conversationId);
     } catch (e) {}
     // fetch existing messages for this conversation
     (async () => {
       try {
+        console.log("Fetching messages for conversation:", conversationId);
         const res = await fetch(
           `${backend}/getMessages?email=${encodeURIComponent(userEmail)}&conversation_id=${encodeURIComponent(conversationId)}`
         );
         if (res.ok) {
           const data = await res.json();
+          console.log("Loaded messages:", data);
           if (data && data.messages) {
             // dedupe by id
             const map = new Map<string, string>();
@@ -295,7 +313,7 @@ export default function ChatPage() {
     } catch (e) {
       // ignore
     }
-  }, [conversationId, userEmail]);
+  }, [conversationId, userEmail, targetEmail, backend]);
 
   if (!authChecked) return null;
 
@@ -325,8 +343,10 @@ export default function ChatPage() {
               <button
                 key={c.id}
                 onClick={() => {
-                  const partner = c.partnerEmail || "";
-                  setTargetEmail(partner);
+                    const partner = c.partnerEmail || "";                  // Skip if already selected to avoid clearing messages
+                  if (c.id === conversationId && partner === targetEmail) {
+                    return;
+                  }                  setTargetEmail(partner);
                   // persist using canonical key
                   const key = `conv:${[userEmail, partner].sort().join(":")}`;
                   try {
