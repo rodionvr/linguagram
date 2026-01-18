@@ -15,7 +15,15 @@ app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "placeholder")
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # Socket.IO for realtime chat
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode='threading',
+    logger=True,
+    engineio_logger=True,
+    ping_timeout=60,
+    ping_interval=25
+)
 
 # map email -> set of socket session ids
 connected_users = {}
@@ -107,7 +115,8 @@ def login():
     # Check for existing account by email (index Email_1 assumed present)
     existing = accounts.find_one({"email": email})
     if existing:
-        existing.pop("_id", None)
+        # Convert ObjectId to string for JSON serialization
+        existing["_id"] = str(existing["_id"])
         return jsonify({"created": False, "user": existing}), 200
 
     # Create new account document inserted into `accounts` collection
@@ -118,11 +127,11 @@ def login():
     }
 
     try:
-        accounts.insert_one(user_doc)
+        result = accounts.insert_one(user_doc)
+        user_doc["_id"] = str(result.inserted_id)
     except Exception as e:
         return jsonify({"error": "Failed to create account: " + str(e)}), 500
 
-    user_doc.pop("_id", None)
     return jsonify({"created": True, "user": user_doc}), 201
 
 @app.route("/message", methods=["POST"])
@@ -466,13 +475,16 @@ def handle_join(data):
     conv_id = data.get("conversation_id")
     email = data.get("email")
     if not conv_id:
+        print(f"[JOIN] No conversation_id provided, sid={request.sid}")
         return
     join_room(conv_id)
+    print(f"[JOIN] Joined room {conv_id}, sid={request.sid}, email={email}")
     # register sid for email if provided
     if email:
         s = connected_users.get(email) or set()
         s.add(request.sid)
         connected_users[email] = s
+        print(f"[JOIN] Also registered {email} with sid={request.sid}")
     emit("joined", {"conversation_id": conv_id}, room=conv_id)
 
 
@@ -496,10 +508,13 @@ def handle_register(data):
     # client tells server its email so server can target direct messages
     email = data.get("email")
     if not email:
+        print(f"[REGISTER] No email provided, sid={request.sid}")
         return
     s = connected_users.get(email) or set()
     s.add(request.sid)
     connected_users[email] = s
+    print(f"[REGISTER] Registered {email} with sid={request.sid}, total sids for {email}: {len(s)}")
+    print(f"[REGISTER] All connected users: {list(connected_users.keys())}")
 
 
 @socketio.on("disconnect")
@@ -617,25 +632,30 @@ def handle_send_message(data):
 
     # emit to conversation room
     room_name = str(conv_obj_id)
+    print(f"[SEND_MESSAGE] Emitting to room {room_name}")
     try:
         emit("message", out_msg, room=room_name)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[SEND_MESSAGE] Failed to emit to room: {e}")
 
     # send directly to connected recipient(s) if available (they may not have joined the room yet)
     try:
         target_sids = connected_users.get(target_email) or set()
+        print(f"[SEND_MESSAGE] Target {target_email} has sids: {target_sids}")
         for sid in list(target_sids):
             try:
                 emit("message", out_msg, room=sid)
-            except Exception:
-                pass
+                print(f"[SEND_MESSAGE] Emitted to target sid {sid}")
+            except Exception as e:
+                print(f"[SEND_MESSAGE] Failed to emit to target sid {sid}: {e}")
         # also ensure sender sid receives it
         sender_sids = connected_users.get(user_email) or set()
+        print(f"[SEND_MESSAGE] Sender {user_email} has sids: {sender_sids}")
         for sid in list(sender_sids):
             try:
                 emit("message", out_msg, room=sid)
-            except Exception:
-                pass
-    except Exception:
-        pass
+                print(f"[SEND_MESSAGE] Emitted to sender sid {sid}")
+            except Exception as e:
+                print(f"[SEND_MESSAGE] Failed to emit to sender sid {sid}: {e}")
+    except Exception as e:
+        print(f"[SEND_MESSAGE] Error in direct emit: {e}")

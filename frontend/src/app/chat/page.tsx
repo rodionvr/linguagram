@@ -6,6 +6,7 @@ import Link from "next/link";
 interface Message {
   id: string;
   text: string;
+  sender_id?: string;
 }
 
 export default function ChatPage() {
@@ -13,7 +14,8 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [targetEmail, setTargetEmail] = useState<string>("");
   const [userEmail, setUserEmail] = useState<string>("");
-  const backend = process.env.BACKEND_URL || "http://localhost:5000"; // адрес Flask
+  const [userId, setUserId] = useState<string>("");
+  const backend = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:5000";
   const socketRef = useRef<any>(null);
   const userEmailRef = useRef<string>("");
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -43,6 +45,24 @@ export default function ChatPage() {
         }
         setUserEmail(email);
         userEmailRef.current = email;
+        // Fetch user ID from backend
+        try {
+          const userRes = await fetch(`${backend}/login?email=${encodeURIComponent(email)}`, {
+            headers: { 'ngrok-skip-browser-warning': 'true' }
+          });
+          if (userRes.ok) {
+            const userData = await userRes.json();
+            console.log("User data from backend:", userData);
+            if (userData.user?._id) {
+              console.log("Setting userId to:", userData.user._id);
+              setUserId(userData.user._id);
+            } else {
+              console.warn("No _id found in user data");
+            }
+          }
+        } catch (e) {
+          console.warn("Failed to fetch user ID", e);
+        }
       } catch (e) {
         router.push("/profile");
       } finally {
@@ -66,9 +86,12 @@ export default function ChatPage() {
       error?: string;
     }
 
+    console.log("Sending message:", { message, userEmail, targetEmail, conversationId, socketConnected: socketRef.current?.connected });
+
     // Prefer websocket if connected
     try {
       if (socketRef.current && socketRef.current.connected) {
+        console.log("Sending via websocket");
         socketRef.current.emit("send_message", {
           message,
           email: userEmail,
@@ -79,10 +102,15 @@ export default function ChatPage() {
         return;
       }
 
+      console.log("Sending via REST");
+
       // Fallback to REST if socket unavailable
       const res = await fetch(`${backend}/message`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          "ngrok-skip-browser-warning": "true"
+        },
         body: JSON.stringify({
           message,
           email: userEmail,
@@ -123,39 +151,57 @@ export default function ChatPage() {
   // Setup Socket.IO client
   useEffect(() => {
     let mounted = true;
-    // load stored conversation id and messages
-    const stored = localStorage.getItem(convStorageKey);
-    if (stored && !conversationId) {
-      setConversationId(stored);
+    // Don't try to load from localStorage until we know both emails (otherwise key is malformed)
+    if (userEmail && targetEmail) {
+      const key = `conv:${[userEmail, targetEmail].sort().join(":")}`;
+      const stored = localStorage.getItem(key);
+      console.log("Socket effect - loading from localStorage:", { key, stored, currentConversationId: conversationId });
+      if (stored && !conversationId) {
+        console.log("Setting conversationId from localStorage:", stored);
+        setConversationId(stored);
+      }
     }
     (async () => {
       try {
         const { io } = await import("socket.io-client");
         if (!mounted) return;
-        const socket = io(backend, { transports: ["websocket"] });
+        const socket = io(backend, { 
+          transports: ["websocket", "polling"],
+          extraHeaders: {
+            "ngrok-skip-browser-warning": "true"
+          },
+          reconnectionDelay: 1000,
+          reconnection: true,
+          reconnectionAttempts: 10,
+          timeout: 20000,
+          forceNew: true
+        });
         socketRef.current = socket;
 
         socket.on("connect", () => {
-          console.debug("socket connected", socket.id);
+          console.log("Socket connected!", { socketId: socket.id, userEmail, conversationId });
           // register this client identity with server for direct deliveries
-          try {
+          if (userEmail) {
+            console.log("Emitting register with email:", userEmail);
             socket.emit("register", { email: userEmail });
-          } catch (e) {}
+          } else {
+            console.warn("Cannot register - userEmail not available yet");
+          }
           // if we already have a conversation, join its room so we receive events
-          if (conversationId) {
-            try {
-              socket.emit("join", { conversation_id: conversationId, email: userEmail });
-            } catch (e) {}
+          if (conversationId && userEmail) {
+            console.log("Emitting join for conversation:", conversationId);
+            socket.emit("join", { conversation_id: conversationId, email: userEmail });
           }
         });
 
         socket.on("message", (data: any) => {
+          console.log("Received message via socket:", data);
           // data: { message_id, conversation_id, sender_id, timestamp, original_text, translated_text }
           // if this client is the sender, show original_text; otherwise show translated_text when available
           const isSender = data.sender_email && data.sender_email === userEmailRef.current;
           const text = isSender ? (data.original_text || data.text || data.translated_text || "") : (data.translated_text || data.original_text || data.text || "");
           const id = data.message_id || String(Date.now());
-          const newMsg = { id, text };
+          const newMsg = { id, text, sender_id: data.sender_id };
           setMessages((prev) => {
             if (prev.find((m) => m.id === newMsg.id)) return prev;
             return [...prev, newMsg];
@@ -178,7 +224,15 @@ export default function ChatPage() {
         });
 
         socket.on("connect_error", (err: any) => {
-          console.warn("socket connect error", err);
+          console.error("Socket connect error:", err);
+        });
+
+        socket.on("error", (err: any) => {
+          console.error("Socket error:", err);
+        });
+
+        socket.on("disconnect", (reason: any) => {
+          console.warn("Socket disconnected:", reason);
         });
       } catch (e) {
         console.warn("Socket.IO client not available, falling back to REST", e);
@@ -193,13 +247,63 @@ export default function ChatPage() {
     };
   }, [backend]);
 
+  // Register socket with user email when it becomes available
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket || !userEmail) return;
+
+    // Register immediately if already connected
+    if (socket.connected) {
+      console.log("Registering socket with email (immediate):", userEmail);
+      socket.emit("register", { email: userEmail });
+    }
+
+    // Also register on future connections (e.g., reconnects)
+    const handleConnect = () => {
+      console.log("Socket connected, registering with email:", userEmail);
+      socket.emit("register", { email: userEmail });
+    };
+
+    socket.on("connect", handleConnect);
+
+    return () => {
+      socket.off("connect", handleConnect);
+    };
+  }, [userEmail]);
+
+  // Join conversation room when conversationId changes
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket || !conversationId || !userEmail) return;
+
+    // Join immediately if already connected
+    if (socket.connected) {
+      console.log("Joining conversation room (immediate):", conversationId);
+      socket.emit("join", { conversation_id: conversationId, email: userEmail });
+    }
+
+    // Also join on future connections (e.g., reconnects)
+    const handleConnect = () => {
+      console.log("Socket connected, joining conversation room:", conversationId);
+      socket.emit("join", { conversation_id: conversationId, email: userEmail });
+    };
+
+    socket.on("connect", handleConnect);
+
+    return () => {
+      socket.off("connect", handleConnect);
+    };
+  }, [conversationId, userEmail]);
+
   // Fetch user's conversations when authenticated/userEmail is known
   useEffect(() => {
     if (!authChecked || !userEmail) return;
     let mounted = true;
     const fetchEmail = async (id: string) => {
       try {
-        const res = await fetch(`${backend}/getEmail?id=${encodeURIComponent(id)}`);
+        const res = await fetch(`${backend}/getEmail?id=${encodeURIComponent(id)}`, {
+          headers: { 'ngrok-skip-browser-warning': 'true' }
+        });
         if (!res.ok) return null;
         const d = await res.json();
         return d.email || null;
@@ -211,7 +315,9 @@ export default function ChatPage() {
     (async () => {
       setLoadingConvs(true);
       try {
-        const res = await fetch(`${backend}/getConvs?email=${encodeURIComponent(userEmail)}`);
+        const res = await fetch(`${backend}/getConvs?email=${encodeURIComponent(userEmail)}`, {
+          headers: { 'ngrok-skip-browser-warning': 'true' }
+        });
         if (!res.ok) {
           setConversations([]);
           setLoadingConvs(false);
@@ -245,6 +351,7 @@ export default function ChatPage() {
         // Auto-select the most recent conversation if available
         if (enriched.length > 0 && !conversationId) {
           const mostRecent = enriched[0];
+          console.log("Auto-selecting conversation:", { id: mostRecent.id, partnerEmail: mostRecent.partnerEmail });
           setTargetEmail(mostRecent.partnerEmail);
           setConversationId(mostRecent.id);
         }
@@ -263,24 +370,38 @@ export default function ChatPage() {
 
   // When conversationId is obtained (e.g., REST created it), join the room
   useEffect(() => {
-    if (!conversationId) return;
-    // persist
+    console.log("Message loading effect triggered:", { conversationId, userEmail, targetEmail, allPresent: !!(conversationId && userEmail && targetEmail) });
+    if (!conversationId || !userEmail || !targetEmail) {
+      console.log("Skipping message load - missing required values");
+      return;
+    }
+    // persist using canonical key
+    const key = `conv:${[userEmail, targetEmail].sort().join(":")}`;;
     try {
-      localStorage.setItem(convStorageKey, conversationId);
+      localStorage.setItem(key, conversationId);
     } catch (e) {}
     // fetch existing messages for this conversation
     (async () => {
       try {
+        console.log("Fetching messages for conversation:", conversationId);
         const res = await fetch(
-          `${backend}/getMessages?email=${encodeURIComponent(userEmail)}&conversation_id=${encodeURIComponent(conversationId)}`
+          `${backend}/getMessages?email=${encodeURIComponent(userEmail)}&conversation_id=${encodeURIComponent(conversationId)}`,
+          { headers: { 'ngrok-skip-browser-warning': 'true' } }
         );
         if (res.ok) {
           const data = await res.json();
+          console.log("Loaded messages:", data);
           if (data && data.messages) {
-            // dedupe by id
-            const map = new Map<string, string>();
-            for (const m of data.messages) map.set(m.message_id, m.text);
-            setMessages(Array.from(map.entries()).map(([id, text]) => ({ id, text })));
+            // dedupe by id and preserve sender_id
+            const map = new Map<string, { text: string; sender_id: string }>();
+            for (const m of data.messages) {
+              map.set(m.message_id, { text: m.text, sender_id: m.sender_id });
+            }
+            setMessages(Array.from(map.entries()).map(([id, { text, sender_id }]) => ({ 
+              id, 
+              text, 
+              sender_id 
+            })));
           }
         }
       } catch (e) {
@@ -295,7 +416,7 @@ export default function ChatPage() {
     } catch (e) {
       // ignore
     }
-  }, [conversationId, userEmail]);
+  }, [conversationId, userEmail, targetEmail, backend]);
 
   if (!authChecked) return null;
 
@@ -325,8 +446,10 @@ export default function ChatPage() {
               <button
                 key={c.id}
                 onClick={() => {
-                  const partner = c.partnerEmail || "";
-                  setTargetEmail(partner);
+                    const partner = c.partnerEmail || "";                  // Skip if already selected to avoid clearing messages
+                  if (c.id === conversationId && partner === targetEmail) {
+                    return;
+                  }                  setTargetEmail(partner);
                   // persist using canonical key
                   const key = `conv:${[userEmail, partner].sort().join(":")}`;
                   try {
@@ -369,7 +492,10 @@ export default function ChatPage() {
                     // call backend to create (or return) conversation; backend will ensure accounts exist
                     const resp = await fetch(`${backend}/createConversation`, {
                       method: "POST",
-                      headers: { "Content-Type": "application/json" },
+                      headers: { 
+                        "Content-Type": "application/json",
+                        "ngrok-skip-browser-warning": "true"
+                      },
                       body: JSON.stringify({ email: userEmail, target_email: email }),
                     });
                     if (!resp.ok) {
@@ -411,14 +537,24 @@ export default function ChatPage() {
         </h1>
 
         <div className="flex flex-col gap-2 w-full max-w-2xl border p-4 rounded h-[60%] overflow-y-auto bg-gray-50">
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className="p-2 bg-blue-100 rounded w-fit max-w-[80%]"
-            >
-              {msg.text}
-            </div>
-          ))}
+          {messages.map((msg) => {
+            const isFromMe = msg.sender_id === userId;
+            console.log("Message alignment:", { msgSenderId: msg.sender_id, userId, isFromMe });
+            return (
+              <div
+                key={msg.id}
+                className={`flex ${isFromMe ? 'justify-end' : 'justify-start'}`}
+              >
+                <div
+                  className={`p-2 rounded w-fit max-w-[80%] ${
+                    isFromMe ? 'bg-blue-500 text-white' : 'bg-gray-200 text-black'
+                  }`}
+                >
+                  {msg.text}
+                </div>
+              </div>
+            );
+          })}
         </div>
 
         <form
