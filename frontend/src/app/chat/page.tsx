@@ -6,6 +6,7 @@ import Link from "next/link";
 interface Message {
   id: string;
   text: string;
+  sender_id?: string;
 }
 
 export default function ChatPage() {
@@ -13,6 +14,7 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [targetEmail, setTargetEmail] = useState<string>("");
   const [userEmail, setUserEmail] = useState<string>("");
+  const [userId, setUserId] = useState<string>("");
   const backend = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:5000";
   const socketRef = useRef<any>(null);
   const userEmailRef = useRef<string>("");
@@ -43,6 +45,24 @@ export default function ChatPage() {
         }
         setUserEmail(email);
         userEmailRef.current = email;
+        // Fetch user ID from backend
+        try {
+          const userRes = await fetch(`${backend}/login?email=${encodeURIComponent(email)}`, {
+            headers: { 'ngrok-skip-browser-warning': 'true' }
+          });
+          if (userRes.ok) {
+            const userData = await userRes.json();
+            console.log("User data from backend:", userData);
+            if (userData.user?._id) {
+              console.log("Setting userId to:", userData.user._id);
+              setUserId(userData.user._id);
+            } else {
+              console.warn("No _id found in user data");
+            }
+          }
+        } catch (e) {
+          console.warn("Failed to fetch user ID", e);
+        }
       } catch (e) {
         router.push("/profile");
       } finally {
@@ -181,7 +201,7 @@ export default function ChatPage() {
           const isSender = data.sender_email && data.sender_email === userEmailRef.current;
           const text = isSender ? (data.original_text || data.text || data.translated_text || "") : (data.translated_text || data.original_text || data.text || "");
           const id = data.message_id || String(Date.now());
-          const newMsg = { id, text };
+          const newMsg = { id, text, sender_id: data.sender_id };
           setMessages((prev) => {
             if (prev.find((m) => m.id === newMsg.id)) return prev;
             return [...prev, newMsg];
@@ -372,10 +392,16 @@ export default function ChatPage() {
           const data = await res.json();
           console.log("Loaded messages:", data);
           if (data && data.messages) {
-            // dedupe by id
-            const map = new Map<string, string>();
-            for (const m of data.messages) map.set(m.message_id, m.text);
-            setMessages(Array.from(map.entries()).map(([id, text]) => ({ id, text })));
+            // dedupe by id and preserve sender_id
+            const map = new Map<string, { text: string; sender_id: string }>();
+            for (const m of data.messages) {
+              map.set(m.message_id, { text: m.text, sender_id: m.sender_id });
+            }
+            setMessages(Array.from(map.entries()).map(([id, { text, sender_id }]) => ({ 
+              id, 
+              text, 
+              sender_id 
+            })));
           }
         }
       } catch (e) {
@@ -511,14 +537,24 @@ export default function ChatPage() {
         </h1>
 
         <div className="flex flex-col gap-2 w-full max-w-2xl border p-4 rounded h-[60%] overflow-y-auto bg-gray-50">
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className="p-2 bg-blue-100 rounded w-fit max-w-[80%]"
-            >
-              {msg.text}
-            </div>
-          ))}
+          {messages.map((msg) => {
+            const isFromMe = msg.sender_id === userId;
+            console.log("Message alignment:", { msgSenderId: msg.sender_id, userId, isFromMe });
+            return (
+              <div
+                key={msg.id}
+                className={`flex ${isFromMe ? 'justify-end' : 'justify-start'}`}
+              >
+                <div
+                  className={`p-2 rounded w-fit max-w-[80%] ${
+                    isFromMe ? 'bg-blue-500 text-white' : 'bg-gray-200 text-black'
+                  }`}
+                >
+                  {msg.text}
+                </div>
+              </div>
+            );
+          })}
         </div>
 
         <form

@@ -115,7 +115,8 @@ def login():
     # Check for existing account by email (index Email_1 assumed present)
     existing = accounts.find_one({"email": email})
     if existing:
-        existing.pop("_id", None)
+        # Convert ObjectId to string for JSON serialization
+        existing["_id"] = str(existing["_id"])
         return jsonify({"created": False, "user": existing}), 200
 
     # Create new account document inserted into `accounts` collection
@@ -126,11 +127,11 @@ def login():
     }
 
     try:
-        accounts.insert_one(user_doc)
+        result = accounts.insert_one(user_doc)
+        user_doc["_id"] = str(result.inserted_id)
     except Exception as e:
         return jsonify({"error": "Failed to create account: " + str(e)}), 500
 
-    user_doc.pop("_id", None)
     return jsonify({"created": True, "user": user_doc}), 201
 
 @app.route("/message", methods=["POST"])
